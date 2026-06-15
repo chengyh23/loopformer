@@ -30,6 +30,19 @@ The codebase is a fork of **NanoGPT**, and we intentionally keep it as close as 
 pip install torch numpy transformers datasets tiktoken wandb tqdm
 ```
 
+## Changes
+`data_generation/` prompts used to generate pos/neg responses of a given persona
+`eval/` code to generate pos/neg responses of a given persona
+`generate_vec.py` code to generate contrastive activation steering vector
+
+
+`inference.py` loopformer's sampling 
+
+Usage:
+```bash
+bash scripts/generate_vec_loopformer.sh
+```
+
 ## Citation
 If you find this work useful, please give us a citation:
 ```bibtex
