@@ -43,6 +43,15 @@ Usage:
 bash scripts/generate_vec_loopformer.sh
 ```
 
+## Evaluation 
+
+Evaluation on `lm-evaluation-harness` (hellaswag, gsm8k_cot, etc.):
+```bash
+lm-eval run --model hf --model_args pretrained=ByteDance/Ouro-1.4B,trust_remote_code=True --tasks hellaswag --device cuda:0 --limit 5 --num_fewshot 3
+```
+
+In-house Evaluation (MATH-500): `eval/eval_math500.py`
+
 ## Citation
 If you find this work useful, please give us a citation:
 ```bibtex

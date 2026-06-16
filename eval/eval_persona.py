@@ -7,6 +7,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from inference import sample
+from eval.model_utils import load_model_loopformer
 
 
 def a_or_an(word):
@@ -43,22 +44,6 @@ def load_persona_questions(trait, persona_instructions_type, assistant_name, ver
     judge_prompts["coherence"] = Prompts[f"coherence_{eval_type}"]
     
     return conversations, judge_prompts
-
-import tiktoken
-def load_model_loopformer(model_path: str, device: str = "cuda"):
-    # -----------------------------------------------------------------------------
-    model_type = "loopformer"
-    # init_from = 'armenjeddi/LoopFormer-3block-8iterations-FineWeb300K' # either 'resume' (from an out_dir), 'gpt2' variant, or HuggingFace model ID (e.g. 'armenjeddi/LoopFormer-3block-8iterations-FineWeb300K')
-    # -----------------------------------------------------------------------------
-
-    if model_type == "loopformer":
-        from models.loopformer import GPTConfig, GPT
-
-    model = GPT.from_pretrained(model_path)
-    model.to(device)
-    enc = tiktoken.get_encoding("gpt2")
-    return model, enc
-
 
 async def judge_answers(texts, answers, judge_prompts, judge_model="gpt-4o-mini", judge_eval_type="0_100"):
     from judge import OpenAiJudge
