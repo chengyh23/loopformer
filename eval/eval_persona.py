@@ -6,8 +6,8 @@ import asyncio
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from inference import sample
-from eval.model_utils import load_model_loopformer
+from inference import sample, sample_hf
+from eval.model_utils import load_model_loopformer, load_model_ouro
 
 
 def a_or_an(word):
@@ -64,6 +64,7 @@ async def judge_answers(texts, answers, judge_prompts, judge_model="gpt-4o-mini"
 def main(
     device: str = "cuda:0",
     model_name: str = "armenjeddi/LoopFormer-3block-8iterations-FineWeb300K",
+    model_type: str = "loopformer",
     trait: str = "evil",
     persona_instruction_type: str = "pos",
     assistant_name: str = "evil",
@@ -74,17 +75,26 @@ def main(
     if os.path.exists(output_path) and not overwrite:
         print(f"Output path {output_path} already exists, skipping...")
         df = pd.read_csv(output_path)
-        for trait in [trait , "coherence"]:
+        for _trait in [trait , "coherence"]:
             threshold = 50
-            print(f"{trait}:  {df[trait].mean():.2f} +- {df[trait].std():.2f}")
+            print(f"{_trait}:  {df[_trait].mean():.2f} +- {df[_trait].std():.2f}")
         return
-    
-    model, enc = load_model_loopformer(model_name, device)
+
+    print(f"Loading model '{model_name}' of type '{model_type}' on device '{device}'...")
+    if model_type == "loopformer":
+        model, enc = load_model_loopformer(model_name, device)
+    elif model_type == "ouro":
+        model, enc = load_model_ouro(model_name, device)
+    else:
+        raise ValueError(f"Unknown model_type: {model_type}. Choose 'loopformer' or 'ouro'.")
     # TODO n_per_question
     conversations, judge_prompts = load_persona_questions(
         trait, persona_instruction_type, assistant_name, version=version)
     # TODO: batch_process
-    texts, answers = sample(model, enc, conversations, device=device)
+    if model_type == "loopformer":
+        texts, answers = sample(model, enc, conversations, device=device)
+    else:
+        texts, answers = sample_hf(model, enc, conversations, device=device)
 
     print(f"Generated answers for questions, now evaluating with judges...")
     outputs = pd.DataFrame(
