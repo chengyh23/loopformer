@@ -52,6 +52,16 @@ lm-eval run --model hf --model_args pretrained=ByteDance/Ouro-1.4B,trust_remote_
 
 In-house Evaluation (MATH-500): `eval/eval_math500.py`
 
+## Analyze steering vector directions across UT steps.
+
+```bash
+python analyze_steering_vectors.py --trait evil
+python analyze_steering_vectors.py --all-traits
+
+python analyze_steering_vectors.py --all-traits --extract # Extract vectors first, then analyze all
+python analyze_steering_vectors.py --help
+```
+
 ## Citation
 If you find this work useful, please give us a citation:
 ```bibtex

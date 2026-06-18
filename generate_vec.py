@@ -12,26 +12,43 @@ def load_jsonl(file_path):
     
 
 def get_hidden_p_and_r(model, tokenizer, prompts, responses, layer_list=None):
-    max_layer = model.config.num_hidden_layers
+    num_hidden_layers = model.config.num_hidden_layers
+    total_ut_steps = model.config.total_ut_steps
+
     if layer_list is None:
-        layer_list = list(range(max_layer+1))
-    prompt_avg = [[] for _ in range(max_layer+1)]
-    response_avg = [[] for _ in range(max_layer+1)]
-    prompt_last = [[] for _ in range(max_layer+1)]
+        layer_list = list(range(num_hidden_layers))
+
+    # Structure: [ut_step][layer] -> list of activations
+    prompt_avg = [[[] for _ in range(num_hidden_layers)] for _ in range(total_ut_steps)]
+    response_avg = [[[] for _ in range(num_hidden_layers)] for _ in range(total_ut_steps)]
+    prompt_last = [[[] for _ in range(num_hidden_layers)] for _ in range(total_ut_steps)]
+
     texts = [p+a for p, a in zip(prompts, responses)]
     for text, prompt in tqdm(zip(texts, prompts), total=len(texts)):
         inputs = tokenizer(text, return_tensors="pt", add_special_tokens=False).to(model.device)
         prompt_len = len(tokenizer.encode(prompt, add_special_tokens=False))
-        outputs = model(**inputs, output_hidden_states=True)
-        for layer in layer_list:
-            prompt_avg[layer].append(outputs.hidden_states[layer][:, :prompt_len, :].mean(dim=1).detach().cpu())
-            response_avg[layer].append(outputs.hidden_states[layer][:, prompt_len:, :].mean(dim=1).detach().cpu())
-            prompt_last[layer].append(outputs.hidden_states[layer][:, prompt_len-1, :].detach().cpu())
+        with torch.no_grad():
+            outputs = model(**inputs, output_hidden_states=True)
+
+        for ut_step in range(total_ut_steps):
+            for layer in layer_list:
+                hidden_idx = 1 + ut_step * num_hidden_layers + layer
+                hidden = outputs.hidden_states[hidden_idx]
+
+                prompt_avg[ut_step][layer].append(hidden[:, :prompt_len, :].mean(dim=1).detach().cpu())
+                response_avg[ut_step][layer].append(hidden[:, prompt_len:, :].mean(dim=1).detach().cpu())
+                prompt_last[ut_step][layer].append(hidden[:, prompt_len-1, :].detach().cpu())
         del outputs
-    for layer in layer_list:
-        prompt_avg[layer] = torch.cat(prompt_avg[layer], dim=0)
-        prompt_last[layer] = torch.cat(prompt_last[layer], dim=0)
-        response_avg[layer] = torch.cat(response_avg[layer], dim=0)
+
+    for ut_step in range(total_ut_steps):
+        for layer in layer_list:
+            if prompt_avg[ut_step][layer]:
+                prompt_avg[ut_step][layer] = torch.cat(prompt_avg[ut_step][layer], dim=0)
+            if prompt_last[ut_step][layer]:
+                prompt_last[ut_step][layer] = torch.cat(prompt_last[ut_step][layer], dim=0)
+            if response_avg[ut_step][layer]:
+                response_avg[ut_step][layer] = torch.cat(response_avg[ut_step][layer], dim=0)
+
     return prompt_avg, prompt_last, response_avg
 
 import pandas as pd
@@ -55,28 +72,72 @@ def get_persona_effective(pos_path, neg_path, trait, threshold=50):
 
 
 def save_persona_vector(model_name, pos_path, neg_path, trait, save_dir, threshold=50):
+    # Check if vectors already exist
+    from pathlib import Path
+    save_dir_path = Path(save_dir)
+
+    # Load model config to get num_ut_steps without loading full model
+    import json
+    config_path = os.path.join(model_name, "config.json")
+    with open(config_path) as f:
+        config = json.load(f)
+    num_ut_steps = config.get("total_ut_steps", 1)
+
+    # Check if all output files exist
+    required_files = []
+    for ut_step in range(num_ut_steps):
+        required_files.extend([
+            f"{trait}_prompt_avg_diff_ut{ut_step}.pt",
+            f"{trait}_response_avg_diff_ut{ut_step}.pt",
+            f"{trait}_prompt_last_diff_ut{ut_step}.pt",
+        ])
+
+    all_exist = all((save_dir_path / f).exists() for f in required_files)
+    if all_exist:
+        print(f"✓ Steering vectors for '{trait}' already exist. Skipping extraction.")
+        return
+
+    print(f"🔄 Extracting steering vectors for '{trait}'...")
+
     # TODO: when to trust_remote_code=True? (for now, for loopformer and Ouro)
     model = AutoModelForCausalLM.from_pretrained(model_name, device_map="auto", trust_remote_code=True)
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 
-    persona_pos_effective, persona_neg_effective, persona_pos_effective_prompts, persona_neg_effective_prompts, persona_pos_effective_responses, persona_neg_effective_responses = get_persona_effective(pos_path, neg_path, trait, threshold)
+    _, _, persona_pos_effective_prompts, persona_neg_effective_prompts, persona_pos_effective_responses, persona_neg_effective_responses = get_persona_effective(pos_path, neg_path, trait, threshold)
 
     persona_effective_prompt_avg, persona_effective_prompt_last, persona_effective_response_avg = {}, {}, {}
 
     persona_effective_prompt_avg["pos"], persona_effective_prompt_last["pos"], persona_effective_response_avg["pos"] = get_hidden_p_and_r(model, tokenizer, persona_pos_effective_prompts, persona_pos_effective_responses)
     persona_effective_prompt_avg["neg"], persona_effective_prompt_last["neg"], persona_effective_response_avg["neg"] = get_hidden_p_and_r(model, tokenizer, persona_neg_effective_prompts, persona_neg_effective_responses)
-    
 
-
-    persona_effective_prompt_avg_diff = torch.stack([persona_effective_prompt_avg["pos"][l].mean(0).float() - persona_effective_prompt_avg["neg"][l].mean(0).float() for l in range(len(persona_effective_prompt_avg["pos"]))], dim=0)
-    persona_effective_response_avg_diff = torch.stack([persona_effective_response_avg["pos"][l].mean(0).float() - persona_effective_response_avg["neg"][l].mean(0).float() for l in range(len(persona_effective_response_avg["pos"]))], dim=0)
-    persona_effective_prompt_last_diff = torch.stack([persona_effective_prompt_last["pos"][l].mean(0).float() - persona_effective_prompt_last["neg"][l].mean(0).float() for l in range(len(persona_effective_prompt_last["pos"]))], dim=0)
+    total_ut_steps = model.config.total_ut_steps
+    num_hidden_layers = model.config.num_hidden_layers
 
     os.makedirs(save_dir, exist_ok=True)
 
-    torch.save(persona_effective_prompt_avg_diff, f"{save_dir}/{trait}_prompt_avg_diff.pt")
-    torch.save(persona_effective_response_avg_diff, f"{save_dir}/{trait}_response_avg_diff.pt")
-    torch.save(persona_effective_prompt_last_diff, f"{save_dir}/{trait}_prompt_last_diff.pt")
+    for ut_step in range(total_ut_steps):
+        prompt_avg_diff = torch.stack(
+            [persona_effective_prompt_avg["pos"][ut_step][l].mean(0).float() -
+             persona_effective_prompt_avg["neg"][ut_step][l].mean(0).float()
+             for l in range(num_hidden_layers)],
+            dim=0
+        )
+        response_avg_diff = torch.stack(
+            [persona_effective_response_avg["pos"][ut_step][l].mean(0).float() -
+             persona_effective_response_avg["neg"][ut_step][l].mean(0).float()
+             for l in range(num_hidden_layers)],
+            dim=0
+        )
+        prompt_last_diff = torch.stack(
+            [persona_effective_prompt_last["pos"][ut_step][l].mean(0).float() -
+             persona_effective_prompt_last["neg"][ut_step][l].mean(0).float()
+             for l in range(num_hidden_layers)],
+            dim=0
+        )
+
+        torch.save(prompt_avg_diff, f"{save_dir}/{trait}_prompt_avg_diff_ut{ut_step}.pt")
+        torch.save(response_avg_diff, f"{save_dir}/{trait}_response_avg_diff_ut{ut_step}.pt")
+        torch.save(prompt_last_diff, f"{save_dir}/{trait}_prompt_last_diff_ut{ut_step}.pt")
 
     print(f"Persona vectors saved to {save_dir}")    
 
