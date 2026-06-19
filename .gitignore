@@ -1,5 +1,6 @@
 eval_persona_extract/
-Ouro-1.4B/
+mmlu_activations/
+Ouro-1.4B**/
 .log/
 
 .DS_Store

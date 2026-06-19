@@ -34,7 +34,7 @@ pip install torch numpy transformers datasets tiktoken wandb tqdm
 `data_generation/` prompts used to generate pos/neg responses of a given persona
 `eval/` code to generate pos/neg responses of a given persona
 `generate_vec.py` code to generate contrastive activation steering vector
-
+`generate_vec_accuracy.py` code to generate accuracy steering vector
 
 `inference.py` loopformer's sampling 
 
@@ -52,7 +52,13 @@ lm-eval run --model hf --model_args pretrained=ByteDance/Ouro-1.4B,trust_remote_
 
 In-house Evaluation (MATH-500): `eval/eval_math500.py`
 
-## Analyze steering vector directions across UT steps.
+## Extract steering vector
+
+Persona steering vector: `scripts/generate_vec_loopformer.sh`
+
+Accuracy steering vector: `scripts/generate_vec_loopedlm_accuracy.sh`
+
+## Analyze steering vector directions & magnitude across UT steps.
 
 ```bash
 python analyze_steering_vectors.py --trait evil
@@ -60,6 +66,8 @@ python analyze_steering_vectors.py --all-traits
 
 python analyze_steering_vectors.py --all-traits --extract # Extract vectors first, then analyze all
 python analyze_steering_vectors.py --help
+python analyze_steering_vectors.py --all-traits --extract --test-time-scaling # Perform 8 UT steps rather than 4
+
 ```
 
 ## Citation
