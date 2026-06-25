@@ -76,11 +76,20 @@ compile = False # use PyTorch 2.0 to compile the model to be faster
 ### added configs
 model_type = "loopformer"
 max_model_loops = 8
+use_damping = False
+hf_model_name = ""  # used when init_from == 'hf'
 
 # -----------------------------------------------------------------------------
 config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
 exec(open('configurator.py').read()) # overrides from command line or config file
 config = {k: globals()[k] for k in config_keys} # will be useful for logging
+
+print("\n" + "="*60)
+print("FINAL CONFIG (after all overrides):")
+print("="*60)
+for k in sorted(config_keys):
+    print(f"  {k:<30} = {config[k]}")
+print("="*60 + "\n")
 # -----------------------------------------------------------------------------
 
 ### modified imports
@@ -176,7 +185,7 @@ if os.path.exists(meta_path):
 
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
-                  bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
+                  bias=bias, vocab_size=None, dropout=dropout, use_damping=use_damping)
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
@@ -217,6 +226,19 @@ elif init_from == 'resume':
 
     for _ in range(val_iter_num):
         next(val_iter)
+elif init_from == 'hf':
+    assert hf_model_name, "set hf_model_name when init_from='hf'"
+    print(f"Loading pretrained weights from HuggingFace: {hf_model_name}")
+    model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
+    gptconf = GPTConfig(**model_args)
+    model = GPT(gptconf)
+    # load via the no-damping variant so we get a clean state_dict to copy from
+    base_cfg = GPTConfig(**{**model_args, 'use_damping': False})
+    base_model = GPT.from_pretrained(hf_model_name, config=base_cfg)
+    missing, unexpected = model.load_state_dict(base_model.state_dict(), strict=False)
+    del base_model
+    if missing:
+        print(f"  keys not in pretrained checkpoint (will use init): {missing}")
 # crop down the model block size if desired, using model surgery
 if block_size < model.config.block_size:
     model.crop_block_size(block_size)
@@ -349,7 +371,15 @@ while True:
 
                 loss_ntp = loss1 + 0.1 * loss2 
                 loss_consistency = F.mse_loss(x1.detach(), x2)
+
+                use_composition_consistency = True
+                # composition consistency: model must refine from intermediate hidden state
+                logits_ext, loss_ext, x2_loops = model(X, Y, long_trajectory,
+                                                       t_start=0.0, x_init=x1.detach())
+
                 loss = loss_ntp + 0.1 * loss_consistency
+                if use_composition_consistency:
+                    loss += 0.5 * loss_ext
             elif 'tmlt' in model_type or 'base_loop':
                 logits1, loss, x1 = model(X, Y, steps=max_model_loops)
                 if 'ee' in model_type: # in early-exit mode
@@ -389,7 +419,7 @@ while True:
         if local_iter_num >= 5: # let the training loop settle a bit
             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
             running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
-        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
+        print(f"iter {iter_num}/{max_iters}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
     iter_num += 1
     local_iter_num += 1
 

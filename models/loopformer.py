@@ -159,6 +159,7 @@ class GPTConfig:
     dropout: float = 0.0
     bias: bool = False # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     intermediate_dim: int = 5120
+    use_damping: bool = False
 
 class GPT(nn.Module):
 
@@ -178,6 +179,8 @@ class GPT(nn.Module):
 
         self.time_embedder = TimestepEmbedder(config.n_embd)
         self.dt_embedder = TimestepEmbedder(config.n_embd)
+        if config.use_damping:
+            self.loop_alpha = nn.Parameter(torch.tensor(0.9))
 
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
@@ -216,24 +219,31 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None, steps=[1/8]*8):
+    def forward(self, idx, targets=None, steps=[1/8]*8, t_start=0.0, x_init=None):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t) 
+        pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
-        # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
+        if x_init is not None:
+            x = x_init
+        else:
+            tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+            pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
+            x = self.transformer.drop(tok_emb + pos_emb)
 
-        ti = torch.zeros(x.shape[0], dtype=x.dtype).to(x.device)
+        ti = torch.full((b,), t_start, dtype=x.dtype, device=device)
+        if self.config.use_damping:
+            alpha = self.loop_alpha.clamp(0.0, 1.0)
         for dt in steps:
             dt_base = torch.ones_like(ti) * dt
             te = self.time_embedder(ti)
             dte = self.dt_embedder(dt_base)
             c = te + dte
-            x = self.transformer.h(x, c)
+            if self.config.use_damping:
+                x = (1 - alpha) * x + alpha * self.transformer.h(x, c)
+            else:
+                x = self.transformer.h(x, c)
             ti = ti + dt
 
         x = self.transformer.norm_f(x)

@@ -1,3 +1,8 @@
+.log/
+eval_persona_extract/
+mmlu_activations/
+Ouro**/
+
 .DS_Store
 .idea
 .ipynb_checkpoints/

@@ -29,6 +29,12 @@ The codebase is a fork of **NanoGPT**, and we intentionally keep it as close as 
 ```bash
 pip install torch numpy transformers datasets tiktoken wandb tqdm
 ```
+## Training
+
+```bash
+python train.py config/train_loopformer_3blk_damping.py
+python train.py config/train_loopformer_3blk_wo_damping.py
+```
 
 ## Citation
 If you find this work useful, please give us a citation:
