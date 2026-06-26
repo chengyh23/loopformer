@@ -160,6 +160,7 @@ class GPTConfig:
     bias: bool = False # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     intermediate_dim: int = 5120
     use_damping: bool = False
+    loop_alpha: float = 0.9
 
 class GPT(nn.Module):
 
@@ -180,7 +181,7 @@ class GPT(nn.Module):
         self.time_embedder = TimestepEmbedder(config.n_embd)
         self.dt_embedder = TimestepEmbedder(config.n_embd)
         if config.use_damping:
-            self.loop_alpha = nn.Parameter(torch.tensor(0.9))
+            self.loop_alpha = nn.Parameter(torch.tensor(config.loop_alpha))
 
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:

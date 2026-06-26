@@ -1,11 +1,10 @@
 """
 PoC: loopformer vs loopformer+damping on HellaSwag / PIQA / WinoGrande / ARC
-Tests loop counts: 4 (training-time) and 8 (2x test-time scaling)
 
 Usage:
-    python eval_hellaswag_poc.py \
-        [--task hellaswag|piqa|winogrande|arc] \
-        [--loops 4 8] [--num_examples 1000] [--device cuda]
+    python eval_poc.py \
+        [--task hellaswag|piqa|winogrande|arc-easy|arc-challenge] \
+        [--loops 4 8 12 16 20 24] [--num_examples 1000] [--device cuda]
 
 Dependencies:  pip install datasets tiktoken
 """
@@ -15,6 +14,8 @@ import torch.nn.functional as F
 from dataclasses import asdict
 from datasets import load_dataset
 from tqdm import tqdm
+import csv
+from datetime import datetime
 
 from models.loopformer import GPTConfig, GPT
 
@@ -32,7 +33,7 @@ def load_model(ckpt_path: str, device: str, use_damping: bool = False) -> GPT:
         cfg_dict = asdict(cfg_obj) if hasattr(cfg_obj, '__dataclass_fields__') else dict(cfg_obj)
         model = GPT(GPTConfig(**cfg_dict))
         sd = {k.removeprefix('_orig_mod.'): v for k, v in ckpt['model'].items()}
-        missing, unexpected = model.load_state_dict(sd, strict=False)
+        missing, _ = model.load_state_dict(sd, strict=False)
         if missing:
             print(f"  [warn] missing keys in {ckpt_path}: {missing}")
     else:
@@ -40,6 +41,9 @@ def load_model(ckpt_path: str, device: str, use_damping: bool = False) -> GPT:
         cfg = GPTConfig(use_damping=use_damping)
         model = GPT.from_pretrained(ckpt_path, config=cfg)
     model.eval().to(device)
+
+    # print model config
+    print(f"  Model config: {asdict(model.config)}")
     return model
 
 
@@ -68,6 +72,35 @@ def log_likelihood(model: GPT, ctx_ids: list, cont_ids: list,
 # ---------------------------------------------------------------------------
 # Task evaluation
 # ---------------------------------------------------------------------------
+def load_task(current_task: str):
+    # load dataset for current task
+    if current_task == 'hellaswag':
+        print("Loading HellaSwag validation split...")
+        ds = load_dataset("Rowan/hellaswag", split="validation")
+        eval_fn = evaluate_hellaswag
+    elif current_task == 'piqa':
+        print("Loading PIQA validation split...")
+        ds = load_dataset("ybisk/piqa", split="validation")
+        eval_fn = evaluate_piqa
+    elif current_task == 'winogrande':
+        print("Loading WinoGrande validation split...")
+        ds = load_dataset("allenai/winogrande", "winogrande_xl", split="validation")
+        eval_fn = evaluate_winogrande
+    elif current_task == 'arc-easy':
+        print("Loading ARC-Easy validation split...")
+        ds = load_dataset("allenai/ai2_arc", "ARC-Easy", split="validation")
+        eval_fn = evaluate_arc
+    elif current_task == 'arc-challenge':
+        print("Loading ARC-Challenge validation split...")
+        ds = load_dataset("allenai/ai2_arc", "ARC-Challenge", split="validation")
+        eval_fn = evaluate_arc
+    elif current_task == 'gsm8k':
+        print("Loading GSM8K validation split...")
+        ds = load_dataset("openai/gsm8k", "main", split="test")  # test split has ground truth
+        eval_fn = evaluate_gsm8k
+    else:
+        raise ValueError(f"Unknown task: {current_task}")
+    return ds, eval_fn
 
 def evaluate_hellaswag(model: GPT, dataset, num_loops: int,
                        device: str, dtype: torch.dtype, num_examples: int) -> float:
@@ -75,8 +108,11 @@ def evaluate_hellaswag(model: GPT, dataset, num_loops: int,
     enc = tiktoken.get_encoding("gpt2")
     steps = [1 / num_loops] * num_loops
 
+    if num_examples is None:
+        num_examples = len(dataset)
+
     correct = 0
-    for ex in tqdm(dataset.select(range(num_examples)), desc=f"loops={num_loops}", leave=False):
+    for ex in tqdm(dataset.select(range(min(num_examples, len(dataset)))), desc=f"loops={num_loops}", leave=False):
         ctx_ids = enc.encode(ex['ctx'])
         label   = int(ex['label'])
         scores  = [
@@ -96,8 +132,11 @@ def evaluate_piqa(model: GPT, dataset, num_loops: int,
     enc = tiktoken.get_encoding("gpt2")
     steps = [1 / num_loops] * num_loops
 
+    if num_examples is None:
+        num_examples = len(dataset)
+
     correct = 0
-    for ex in tqdm(dataset.select(range(num_examples)), desc=f"loops={num_loops}", leave=False):
+    for ex in tqdm(dataset.select(range(min(num_examples, len(dataset)))), desc=f"loops={num_loops}", leave=False):
         goal_ids = enc.encode(ex['goal'])
         label = int(ex['label'])
         scores = [
@@ -117,8 +156,11 @@ def evaluate_winogrande(model: GPT, dataset, num_loops: int,
     enc = tiktoken.get_encoding("gpt2")
     steps = [1 / num_loops] * num_loops
 
+    if num_examples is None:
+        num_examples = len(dataset)
+
     correct = 0
-    for ex in tqdm(dataset.select(range(num_examples)), desc=f"loops={num_loops}", leave=False):
+    for ex in tqdm(dataset.select(range(min(num_examples, len(dataset)))), desc=f"loops={num_loops}", leave=False):
         sentence_ids = enc.encode(ex['sentence'])
         label = 0 if ex['answer'] == '1' else 1
         scores = [
@@ -138,8 +180,11 @@ def evaluate_arc(model: GPT, dataset, num_loops: int,
     enc = tiktoken.get_encoding("gpt2")
     steps = [1 / num_loops] * num_loops
 
+    if num_examples is None:
+        num_examples = len(dataset)
+
     correct = 0
-    for ex in tqdm(dataset.select(range(num_examples)), desc=f"loops={num_loops}", leave=False):
+    for ex in tqdm(dataset.select(range(min(num_examples, len(dataset)))), desc=f"loops={num_loops}", leave=False):
         question_ids = enc.encode(ex['question'])
         label = ord(ex['answerKey']) - ord('A')  # 'A'->0, 'B'->1, etc.
         scores = [
@@ -153,82 +198,117 @@ def evaluate_arc(model: GPT, dataset, num_loops: int,
     return correct / num_examples
 
 
+def evaluate_gsm8k(model: GPT, dataset, num_loops: int,
+                   device: str, dtype: torch.dtype, num_examples: int) -> float:
+    import tiktoken
+    enc = tiktoken.get_encoding("gpt2")
+    steps = [1 / num_loops] * num_loops
+
+    if num_examples is None:
+        num_examples = len(dataset)
+
+    correct = 0
+    for ex in tqdm(dataset.select(range(min(num_examples, len(dataset)))), desc=f"loops={num_loops}", leave=False):
+        question_ids = enc.encode(ex['question'])
+        # extract answer from "#### <answer>" format
+        answer_text = ex['answer'].split('####')[-1].strip()
+        answer_ids = enc.encode(" " + answer_text)
+
+        ll = log_likelihood(model, question_ids, answer_ids, steps, device, dtype)
+        # simple heuristic: if log likelihood is not too negative, count as correct
+        # (this is a rough approximation; ideally you'd parse the model's generated text)
+        if ll > -50:  # threshold, can be tuned
+            correct += 1
+
+    return correct / num_examples
+
+
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--task',         default='hellaswag', choices=['hellaswag', 'piqa', 'winogrande', 'arc-easy', 'arc-challenge'])
-    parser.add_argument('--loops',        nargs='+', type=int, default=[4, 8])
-    parser.add_argument('--num_examples', type=int,  default=1000)
+    parser.add_argument('--task',         nargs='*',
+                        choices=['hellaswag', 'piqa', 'winogrande', 'arc-easy', 'arc-challenge', 'gsm8k'],
+                        help='task(s) to evaluate. if not specified, eval all tasks')
+    parser.add_argument('--loops',        nargs='+', type=int, default=[4, 8, 12, 16, 20, 24])
+    parser.add_argument('--num_examples', type=int,  default=None, help='number of examples to evaluate. if not specified, use full dataset')
     parser.add_argument('--device',       default='cuda')
     args = parser.parse_args()
+
+    # default to all tasks if none specified
+    if not args.task:
+        args.task = ['hellaswag', 'piqa', 'winogrande', 'arc-easy', 'arc-challenge', 'gsm8k']
 
     dtype  = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
     device = args.device
 
-    # load dataset
-    if args.task == 'hellaswag':
-        print("Loading HellaSwag validation split...")
-        ds = load_dataset("Rowan/hellaswag", split="validation")
-        eval_fn = evaluate_hellaswag
-    elif args.task == 'piqa':
-        print("Loading PIQA validation split...")
-        ds = load_dataset("ybisk/piqa", split="validation")
-        eval_fn = evaluate_piqa
-    elif args.task == 'winogrande':
-        print("Loading WinoGrande validation split...")
-        ds = load_dataset("allenai/winogrande", "winogrande_xl", split="validation")
-        eval_fn = evaluate_winogrande
-    elif args.task == 'arc-easy':
-        print("Loading ARC-Easy validation split...")
-        ds = load_dataset("allenai/ai2_arc", "ARC-Easy", split="validation")
-        eval_fn = evaluate_arc
-    elif args.task == 'arc-challenge':
-        print("Loading ARC-Challenge validation split...")
-        ds = load_dataset("allenai/ai2_arc", "ARC-Challenge", split="test") # validaton only 299 rows, so use test split instead
-        eval_fn = evaluate_arc
-    else:
-        raise ValueError(f"Unknown task: {args.task}")
+    # checkpoint configs
+    test_configs = [
+        # name, ckpt_path, use_damping
+        # ('loopformer', "armenjeddi/LoopFormer-3block-8iterations", False),
+        ('loopformer_fineweb', "armenjeddi/LoopFormer-3block-8iterations-FineWeb300K", False),
+        # ('loopformer+damping', "runs/loopformer_damping/ckpt.pt", True),
+    ]
 
-    ckpt_base = "armenjeddi/LoopFormer-3block-8iterations"
-    ckpt_damping = "runs/loopformer_damping/ckpt.pt"
-    ckpt_wo_damping = "runs/loopformer_wo_damping/ckpt.pt"
+    # collect all results: (config_name, task) -> {num_loops: acc}
+    all_results = {}
 
-    checkpoints = {
-        'loopformer':         ckpt_base,
-        'loopformer+damping': ckpt_damping,
-        'loopformer+wo_damping': ckpt_wo_damping,
-    }
 
-    results = {}
-    for name, path in checkpoints.items():
-        print(f"\nLoading {name} from {path}")
-        use_damping = (name == 'loopformer+damping')
-        model = load_model(path, device, use_damping=use_damping)
-        for num_loops in args.loops:
-            acc = eval_fn(model, ds, num_loops, device, dtype, args.num_examples)
-            results[(name, num_loops)] = acc
+    # evaluate each config
+    for name, ckpt_path, use_damping in test_configs:
+        print(f"\nLoading {name} from {ckpt_path}")
+        model = load_model(ckpt_path, device, use_damping=use_damping)
+
+        # loop over all requested tasks
+        for current_task in args.task:
+            key = (name, current_task)
+            all_results[key] = {}
+            print(f"\n{'='*60}")
+            print(f"NAME: {name}, TASK: {current_task.upper()}")
+            print(f"{'='*60}")
+
+            ds, eval_fn = load_task(current_task)
+        
+            for num_loops in args.loops:
+                acc = eval_fn(model, ds, num_loops, device, dtype, args.num_examples)
+                all_results[key][num_loops] = acc
         del model
         torch.cuda.empty_cache()
 
-    # print table (rows = models, cols = loop counts)
-    print("\n" + args.task.upper())
-    header = "\t" + "\t".join(str(l) for l in args.loops)
-    print(header)
-    for name in checkpoints:
-        row = name
-        for num_loops in args.loops:
-            acc = results[(name, num_loops)]
-            row += f"\t{acc:.4f}"
-        print(row)
+    # print unified table
+    print(f"\n{'='*80}")
+    print("UNIFIED RESULTS TABLE")
+    print(f"{'='*80}\n")
 
-    print("\nTest-time scaling delta (max_loops - min_loops):")
-    lo, hi = min(args.loops), max(args.loops)
-    for name in checkpoints:
-        delta = results[(name, hi)] - results[(name, lo)]
-        print(f"  {name}: {delta:+.4f}  ({lo} loops → {hi} loops)")
+    # build header
+    header = ['name', 'dataset'] + [str(l) for l in args.loops]
+    print('\t'.join(header))
+
+    # build rows
+    csv_rows = [header]
+    for name, _, _ in test_configs:
+        for task in args.task:
+            key = (name, task)
+            if key in all_results:
+                row = [name, task]
+                for num_loops in args.loops:
+                    acc = all_results[key].get(num_loops, None)
+                    if acc is not None:
+                        row.append(f"{acc:.4f}")
+                    else:
+                        row.append("N/A")
+                print('\t'.join(row))
+                csv_rows.append(row)
+
+    # write to CSV with timestamp
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    csv_path = f'eval_results_{timestamp}.csv'
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerows(csv_rows)
+    print(f"\nResults saved to {csv_path}")
 
 
 if __name__ == '__main__':

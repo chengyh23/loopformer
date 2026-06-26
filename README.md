@@ -36,6 +36,11 @@ python train.py config/train_loopformer_3blk_damping.py
 python train.py config/train_loopformer_3blk_wo_damping.py
 ```
 
+## Evaluation
+```bash
+python eval_poc.py --task winogrande  --loops 4 8 12 16 20 24    --num_examples 500
+```
+
 ## Citation
 If you find this work useful, please give us a citation:
 ```bibtex

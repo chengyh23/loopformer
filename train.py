@@ -77,6 +77,7 @@ compile = False # use PyTorch 2.0 to compile the model to be faster
 model_type = "loopformer"
 max_model_loops = 8
 use_damping = False
+loop_alpha = 0.9  # initial value for damping
 hf_model_name = ""  # used when init_from == 'hf'
 
 # -----------------------------------------------------------------------------
@@ -185,7 +186,8 @@ if os.path.exists(meta_path):
 
 # model init
 model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
-                  bias=bias, vocab_size=None, dropout=dropout, use_damping=use_damping)
+                  bias=bias, vocab_size=None, dropout=dropout, use_damping=use_damping,
+                  loop_alpha=loop_alpha)
 if init_from == 'scratch':
     # init a new model from scratch
     print("Initializing a new model from scratch")
@@ -237,6 +239,7 @@ elif init_from == 'hf':
     base_model = GPT.from_pretrained(hf_model_name, config=base_cfg)
     missing, unexpected = model.load_state_dict(base_model.state_dict(), strict=False)
     del base_model
+    torch.cuda.empty_cache()
     if missing:
         print(f"  keys not in pretrained checkpoint (will use init): {missing}")
 # crop down the model block size if desired, using model surgery
@@ -372,7 +375,7 @@ while True:
                 loss_ntp = loss1 + 0.1 * loss2 
                 loss_consistency = F.mse_loss(x1.detach(), x2)
 
-                use_composition_consistency = True
+                use_composition_consistency = False # True
                 # composition consistency: model must refine from intermediate hidden state
                 logits_ext, loss_ext, x2_loops = model(X, Y, long_trajectory,
                                                        t_start=0.0, x_init=x1.detach())
