@@ -1,7 +1,9 @@
 .log/
+eval/
 eval_persona_extract/
 mmlu_activations/
 Ouro**/
+tmp/
 
 .DS_Store
 .idea
