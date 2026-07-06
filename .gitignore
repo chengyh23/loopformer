@@ -4,6 +4,8 @@ eval_persona_extract/
 mmlu_activations/
 Ouro**/
 tmp/
+mechanistic_analysis/*.npy
+mechanistic_analysis/*.png
 
 .DS_Store
 .idea
