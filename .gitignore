@@ -6,6 +6,7 @@ Ouro**/
 tmp/
 mechanistic_analysis/*.npy
 mechanistic_analysis/*.png
+.env
 
 .DS_Store
 .idea

@@ -63,6 +63,56 @@ python attn_frobenius_hellaswag.py --num_loops 24 --num_examples 20
 
 **Extrapolation behavior**: When pushed beyond the training distribution (8 iterations), reasoning tasks show continued evolution, while non-reasoning tasks exhibit flat patterns, suggesting different generalization characteristics.
 
+## Layer Skip in Ouro
+
+To study the role of individual layers in Ouro, we implement selective layer skipping during inference.
+
+Files
+
+- `tests/gen_ouro_random_skip.py` — Custom generation 
+- `tests/test_lm_eval.py` — Evaluate on benchmark
+
+
+### Results
+
+**Configuration (Ouro)** ByteDance/Ouro-1.4B
+
+```python
+"skip_layers": {"2": [6, 10, 15, 17, 19, 20]}
+"skip_layers": {"2": [15, 16, 17, 18, 19, 20]}
+"skip_layers": {"2": [6, 7, 8, 18, 19, 20]}
+"skip_layers": {"2": [6, 7, 14, 15, 19, 20]}
+"skip_layers": {"1": [14, 15], "2": [6, 7], "3": [19, 20]}
+"skip_layers": {"1": [6, 7], "2": [14, 15], "3": [19, 20]}
+"skip_layers": {"1": [6, 7], "2": [6, 7], "3": [6, 7]}
+"skip_layers": {"1": [19, 20], "2": [19, 20], "3": [19, 20]}
+```
+
+| Task | Full | Skip |skip_layers|
+|------|------|------|------|
+| HellaSwag | 0.7161 | 0.6552 | {"2": [6, 10, 15, 17, 19, 20]}  |
+| GSM8K | 0.7938 | 0.3973 | {"2": [6, 10, 15, 17, 19, 20]}  |
+| GSM8K |        | 0.5072 | {"2": [15, 16, 17, 18, 19, 20]} |
+| GSM8K |        | 0.5246 | {"2": [6, 7, 8, 18, 19, 20]}  |
+| GSM8K |        | 0.4928 | {"2": [6, 7, 14, 15, 19, 20]} |
+| GSM8K |        | 0.3389 | {"1": [14, 15], "2": [6, 7], "3": [19, 20]} |
+| GSM8K |        | 0.3897 | {"1": [6, 7], "2": [14, 15], "3": [19, 20]} |
+| GSM8K |        | 0.2290 | {"1": [6, 7], "2": [6, 7], "3": [6, 7]} |
+| GSM8K |        | 0.4329 | {"1": [19, 20], "2": [19, 20], "3": [19, 20]} |
+
+
+
+gsm8k metric: flexible-extract
+
+**Configuration (LoopFormer)** armenjeddi/LoopFormer-3block-8iterations-FineWeb300K
+```python
+"skip_layers": {"1": [2], "3": [1], "6": [0]}
+```
+
+| Task | Full | Skip |
+|------|------|------|
+| HellaSwag | 0.4181 | 0.3922 |
+
 ## Citation
 If you find this work useful, please give us a citation:
 ```bibtex
