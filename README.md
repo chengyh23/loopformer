@@ -113,6 +113,20 @@ gsm8k metric: flexible-extract
 |------|------|------|
 | HellaSwag | 0.4181 | 0.3922 |
 
+**Llama** meta-llama/Llama-3.2-3B-Instruct
+
+`skip_layers = {"1": [2], "3": [1]}`
+
+|    Task     | HellaSwag | GSM8K |
+|-------------|------|------|
+| Llama       | 0.7167 | 0.6793 |
+| LlamaLooped | 0.4569 | 0.0083 |
+| LlamaLooped w/ skip | 0.4631 |  |
+| LlamaLooped recur (token) |  | 0.0159 |
+| LlamaLooped recur (soft) |  | 0.0068 |
+| LlamaLooped (2 loops) |  | 0.0144 |
+
+
 ## Citation
 If you find this work useful, please give us a citation:
 ```bibtex
