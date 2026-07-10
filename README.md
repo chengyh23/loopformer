@@ -63,7 +63,7 @@ python attn_frobenius_hellaswag.py --num_loops 24 --num_examples 20
 
 **Extrapolation behavior**: When pushed beyond the training distribution (8 iterations), reasoning tasks show continued evolution, while non-reasoning tasks exhibit flat patterns, suggesting different generalization characteristics.
 
-## Layer Skip in Ouro
+## Layer Skip Analysis
 
 To study the role of individual layers in Ouro, we implement selective layer skipping during inference.
 
@@ -113,7 +113,7 @@ gsm8k metric: flexible-extract
 |------|------|------|
 | HellaSwag | 0.4181 | 0.3922 |
 
-**Llama** meta-llama/Llama-3.2-3B-Instruct
+**Configuration (Llama)** meta-llama/Llama-3.2-3B-Instruct
 
 `skip_layers = {"1": [2], "3": [1]}`
 
@@ -125,6 +125,25 @@ gsm8k metric: flexible-extract
 | LlamaLooped recur (token) |  | 0.0159 |
 | LlamaLooped recur (soft) |  | 0.0068 |
 | LlamaLooped (2 loops) |  | 0.0144 |
+
+## Llama Looped Finetuning w/ Lora
+
+meta-llama/Llama-3.2-3B-Instruct
+
+|        Task          | GSM8K (flexible-extract) |
+|----------------------|-------|
+| llama                | 0.7718 |
+| llama looped         | 0.0106 |
+| llama looped w/ lora | 0.6535 |
+
+## Loop Norm Analysis
+
+num_loops=4
+
+|        Task          | norm (mean) |
+|----------------------|-------|
+| llama looped         | [1.019, 43.573, 73.341, 121.094, 190.850] |
+| llama looped w/ lora | [1.019, 66.619, 149.975, 199.049, 234.016] |
 
 
 ## Citation

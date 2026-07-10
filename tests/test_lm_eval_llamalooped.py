@@ -1,131 +1,143 @@
+import argparse
 import os
+import sys
 import json
 from datetime import datetime
+from transformers import AutoTokenizer, AutoModelForCausalLM
+import logging
+
+# Set logging to WARNING to reduce overhead
+logging.basicConfig(level=logging.WARNING)
+
+# Make `models` importable when run as `python tests/test_lm_eval_llamalooped.py`.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from models.llama_looped import LlamaLoopedForCausalLM
+
 import lm_eval
-
-output_path = "eval/"
-os.makedirs(output_path, exist_ok=True)
-
-# Evaluation backend:
-#   "vllm": fast, use for full benchmarks. Injects loop config via hf_overrides.
-#   "hf":   HuggingFace reference (slow, esp. on generative gsm8k). The HF
-#           backend has no hf_overrides hook, so we bake the loop config into a
-#           local checkpoint and register the Auto classes in-process.
-backend = "vllm"
-
-pretrained_model = "meta-llama/Llama-3.2-3B-Instruct"
-max_model_len = 4096
-# Where the HF looped checkpoint is materialized (backend="hf" only).
-hf_ckpt_dir = "ckpts/llama_looped"
-# Subsample for quick sanity runs (e.g. 50). None = full task.
-limit = None
-
-# Set to False to run the vanilla Llama baseline (stock LlamaForCausalLM, no
-# looping) for comparison against the looped variant.
-use_looped = True
-num_loops = 4
-
-# Recurrence mode for the looped variant:
-#   "latent": hidden states flow directly into the next loop (continuous
-#             residual). Default, backward-compatible.
-#   "token":  between loops the hidden state is decoded to a token (greedy
-#             argmax) and re-embedded (iterative self-conditioning). TP=1 only.
-#   "soft":   next input = softmax(logits) @ E, the expected embedding under the
-#             predicted distribution (soft bottleneck). Compile-friendly. TP=1.
-recur_mode = "latent"
-
-# skip_layers = {"1": [2], "3": [1]}
-skip_layers = None
-
-# tasks = ["hellaswag"]
-tasks = ["gsm8k"]
+from lm_eval.models.huggingface import HFLM
 
 
-def build_hf_ckpt_llama_looped(base, ckpt_dir):
-    """Materialize a looped checkpoint from a stock Llama, baking in the loop
-    config, so the HF backend can load it via AutoModelForCausalLM."""
-    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
-    from models.llama_looped import LlamaLoopedConfig, LlamaLoopedForCausalLM
+def parse_args():
+    parser = argparse.ArgumentParser(description="Evaluate LoopedLlama with lm_eval")
+    parser.add_argument("--backend", type=str, default="vllm", choices=["vllm", "hf"],
+                        help="Evaluation backend: vllm (fast) or hf (reference)")
+    parser.add_argument("--model", type=str, default="meta-llama/Llama-3.2-3B-Instruct",
+                        help="Pretrained model name or path")
+    parser.add_argument("--max_model_len", type=int, default=2048,
+                        help="Maximum model sequence length (vllm only)")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Number of samples to evaluate (None=full test set)")
+    parser.add_argument("--use_looped", action="store_true", default=True,
+                        help="Use looped variant")
+    parser.add_argument("--no_looped", dest="use_looped", action="store_false",
+                        help="Use vanilla baseline (no looping)")
+    parser.add_argument("--num_loops", type=int, default=4,
+                        help="Number of recurrent loops")
+    parser.add_argument("--recur_mode", type=str, default="latent",
+                        choices=["latent", "token", "soft"],
+                        help="Recurrence mode: latent (residual), token (greedy argmax), or soft (softmax bottleneck)")
+    parser.add_argument("--use_lora", action="store_true", default=True,
+                        help="Use LoRA adapter if available")
+    parser.add_argument("--no_lora", dest="use_lora", action="store_false",
+                        help="Disable LoRA adapter")
+    parser.add_argument("--lora_adapter_dir", type=str, default="ckpts/llama_looped_lora/adapter",
+                        help="Path to LoRA adapter directory")
+    parser.add_argument("--tasks", type=str, nargs="+", default=["gsm8k"],
+                        help="Tasks to evaluate (gsm8k, hellaswag, etc.)")
+    parser.add_argument("--output_dir", type=str, default="eval/",
+                        help="Output directory for results")
+    parser.add_argument("--gpu_memory_utilization", type=float, default=0.5,
+                        help="GPU memory utilization ratio (vllm only)")
+    return parser.parse_args()
 
-    # Register so AutoModelForCausalLM.from_pretrained resolves the looped class
-    # (config.json model_type == "llama_looped"); no remote code needed.
-    AutoConfig.register("llama_looped", LlamaLoopedConfig)
-    AutoModelForCausalLM.register(LlamaLoopedConfig, LlamaLoopedForCausalLM)
 
-    if not os.path.exists(os.path.join(ckpt_dir, "config.json")):
-        model = LlamaLoopedForCausalLM.from_pretrained(
-            base,
-            num_loops=num_loops,
-            recur_mode=recur_mode,
-            skip_layers=skip_layers,
-            dtype="bfloat16",
-        )
-        model.save_pretrained(ckpt_dir)
-        AutoTokenizer.from_pretrained(base).save_pretrained(ckpt_dir)
-    return ckpt_dir
+args = parse_args()
+os.makedirs(args.output_dir, exist_ok=True)
 
+assert args.use_looped or not args.use_lora, \
+    "LoRA adapters are only for looped variant. Use --no_looped without LoRA or use --use_looped with LoRA."
 
-if backend == "vllm":
-    if use_looped:
+print("\n" + "="*70)
+print("[CONFIG] Evaluation Settings:")
+print("="*70)
+for key, value in vars(args).items():
+    print(f"  {key:30s} = {value}")
+print("="*70 + "\n")
+
+if args.backend == "vllm":
+    if args.use_looped:
         hf_overrides_dict = {
-            # Load the standard Llama checkpoint as the looped (recurrent-depth)
-            # variant by overriding the architecture.
             "architectures": ["LlamaLoopedForCausalLM"],
-            "num_loops": num_loops,
-            "recur_mode": recur_mode,
-            "skip_layers": skip_layers,
+            "num_loops": args.num_loops,
+            "recur_mode": args.recur_mode,
+            "skip_layers": None,
         }
     else:
-        # Baseline: stock Llama, no architecture override, no looping.
         hf_overrides_dict = {}
 
-    # Pass model_args as a dict (not a string): lm-eval comma-splits string
-    # model_args, which shatters nested JSON like hf_overrides. A dict is
-    # forwarded via create_from_arg_obj() untouched, so hf_overrides stays a
-    # real dict and reaches vLLM's LLM(hf_overrides=...) -> config.
     model = "vllm"
     model_args = {
-        "pretrained": pretrained_model,
+        "pretrained": args.model,
         "trust_remote_code": True,
-        "gpu_memory_utilization": 0.5,
-        # Each loop allocates its own KV cache (num_loops * num_layers caches),
-        # so keep max_model_len modest to avoid KV-cache OOM.
-        "max_model_len": max_model_len,
+        "gpu_memory_utilization": args.gpu_memory_utilization,
+        "max_model_len": args.max_model_len,
         "hf_overrides": hf_overrides_dict,
+        "lora_local_path": args.lora_adapter_dir if args.use_lora else None,
     }
-    # "token" recurrence does a data-dependent argmax + embedding gather inside
-    # the forward, which can break torch.compile / CUDA-graph capture. Run eager.
-    if use_looped and recur_mode == "token":
+    if args.use_looped and args.recur_mode == "token":
         model_args["enforce_eager"] = True
     batch_size = "auto"
 
-elif backend == "hf":
-    pretrained = build_hf_ckpt_llama_looped(pretrained_model, hf_ckpt_dir) if use_looped \
-        else pretrained_model
+elif args.backend == "hf":
+    tok = AutoTokenizer.from_pretrained(args.model)
+
+    pretrained = LlamaLoopedForCausalLM.from_pretrained(
+        args.model,
+        num_loops=args.num_loops,
+        recur_mode=args.recur_mode,
+        dtype="bfloat16",
+    ).to("cuda") if args.use_looped else args.model
+
+    # lm = HFLM(
+    #     pretrained=pretrained,
+    #     tokenizer=tok,
+    #     batch_size="auto",
+    # )
     model = "hf"
     model_args = {
         "pretrained": pretrained,
-        "trust_remote_code": True,
+        # "trust_remote_code": True,
         "dtype": "bfloat16",
+        "device_map": "auto",  # Let transformers handle device placement
     }
-    batch_size = 16  # HF benefits from a larger batch
+    batch_size = 1  # For long-generation tasks like GSM8K, batch_size=1 is more stable
 
 else:
-    raise ValueError(f"Unknown backend: {backend!r}")
+    raise ValueError(f"Unknown backend: {args.backend!r}")
 
+
+print("[INFO] Starting evaluation...\n")
 
 results = lm_eval.simple_evaluate(
     model=model,
     model_args=model_args,
-    tasks=tasks,
-    batch_size=batch_size,
-    limit=limit,
+    # model=lm,
+    tasks=args.tasks,
+    limit=args.limit,
+    # batch_size=batch_size,
+    # max_batch_size=batch_size,
+    # num_fewshot=0,
+    # log_samples=False,  # Disable to reduce I/O
+    # cache_requests=True,  # Cache requests
+    # verbosity="INFO",
+    apply_chat_template=True,  # Apply chat template for instruction-tuned models
+    gen_kwargs={"max_gen_toks": 256},  # Limit generation length
 )
 
 
 if results is not None:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    file_path = os.path.join(output_path, f"results_{timestamp}.json")
+    file_path = os.path.join(args.output_dir, f"results_{timestamp}.json")
 
     with open(file_path, "w", encoding="utf-8") as f:
         # 使用 default=str 兜底处理 numpy 或其他特殊类型的评估指标对象

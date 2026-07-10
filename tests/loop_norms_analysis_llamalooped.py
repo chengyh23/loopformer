@@ -11,8 +11,16 @@ in forward), so weights are loaded only once.
 
 Run (single GPU):
     CUDA_VISIBLE_DEVICES=6 python tests/loop_norms_analysis_llamalooped.py
+
+Run with custom parameters:
+    python tests/loop_norms_analysis_llamalooped.py \
+        --model meta-llama/Llama-3.2-3B-Instruct \
+        --num_loops 4 \
+        --recur_modes latent token soft \
+        --n_samples 10
 """
 
+import argparse
 import json
 import os
 import sys
@@ -27,18 +35,39 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models.llama_looped import LlamaLoopedForCausalLM
 
-# ---- config ----
-MODEL = "meta-llama/Llama-3.2-3B-Instruct"
-NUM_LOOPS = 4
-# Modes to compare side by side on the same prompts.
-RECUR_MODES = ["latent", "latent_renorm"]  # + "token", "soft"
-SKIP_LAYERS = None  # e.g. {"1": [2]}; leave None so layers 0/-1 run each loop
-N_SAMPLES = 10
-MAX_NEW_TOKENS = 256
-DEVICE = "cuda"
-OUT_DIR = "eval/"
 
-os.makedirs(OUT_DIR, exist_ok=True)
+def parse_args():
+    parser = argparse.ArgumentParser(description="Analyze loop norms in LoopedLlama")
+    parser.add_argument("--model", type=str, default="meta-llama/Llama-3.2-3B-Instruct",
+                        help="Model name or path")
+    parser.add_argument("--num_loops", type=int, default=4,
+                        help="Number of recurrent loops")
+    parser.add_argument("--recur_modes", type=str, nargs="+", default=["latent"],
+                        help="Recurrence modes to compare (latent, token, soft, etc.)")
+    parser.add_argument("--n_samples", type=int, default=5,
+                        help="Number of GSM8K prompts to analyze")
+    parser.add_argument("--max_new_tokens", type=int, default=256,
+                        help="Maximum tokens to generate per answer")
+    parser.add_argument("--use_lora", action="store_true", default=False,
+                        help="Use LoRA adapter if available")
+    parser.add_argument("--lora_adapter_dir", type=str, default="ckpts/llama_looped_lora/adapter",
+                        help="Path to LoRA adapter directory")
+    parser.add_argument("--device", type=str, default="cuda",
+                        help="Device to run on (cuda, cpu, etc.)")
+    parser.add_argument("--output_dir", type=str, default="eval/",
+                        help="Output directory for results")
+    return parser.parse_args()
+
+
+args = parse_args()
+os.makedirs(args.output_dir, exist_ok=True)
+
+print("\n" + "="*70)
+print("[CONFIG] Loop Norms Analysis Settings:")
+print("="*70)
+for key, value in vars(args).items():
+    print(f"  {key:30s} = {value}")
+print("="*70 + "\n")
 
 
 def load_gsm8k_questions(n):
@@ -60,7 +89,7 @@ def run_mode(model, tok, questions, mode, recording, captured_in, captured_out):
             add_generation_prompt=True,
             return_tensors="pt",
             return_dict=True,
-        ).to(DEVICE)
+        ).to(args.device)
         prompt_len = enc["input_ids"].shape[1]
 
         # (1) instrumented prefill: capture loop input & end-of-loop hidden.
@@ -71,8 +100,8 @@ def run_mode(model, tok, questions, mode, recording, captured_in, captured_out):
             model(**enc)
         recording["on"] = False
 
-        assert len(captured_in) == len(captured_out) == NUM_LOOPS, (
-            f"expected {NUM_LOOPS} captures, got in={len(captured_in)} "
+        assert len(captured_in) == len(captured_out) == args.num_loops, (
+            f"expected {args.num_loops} captures, got in={len(captured_in)} "
             f"out={len(captured_out)} (is layer 0 or -1 skipped in some loop?)"
         )
         in_norm = [c.float().norm(dim=-1).mean().item() for c in captured_in]
@@ -81,7 +110,7 @@ def run_mode(model, tok, questions, mode, recording, captured_in, captured_out):
         # (2) generate the answer text (hooks disabled).
         with torch.no_grad():
             gen = model.generate(
-                **enc, max_new_tokens=MAX_NEW_TOKENS, do_sample=False
+                **enc, max_new_tokens=args.max_new_tokens, do_sample=False
             )
         answer = tok.decode(gen[0, prompt_len:], skip_special_tokens=True)
 
@@ -97,11 +126,13 @@ def run_mode(model, tok, questions, mode, recording, captured_in, captured_out):
         in_str = ", ".join(f"{v:.1f}" for v in in_norm)
         out_str = ", ".join(f"{v:.1f}" for v in out_norm)
         print(f"  [{mode} {qi}] in:[{in_str}]  out:[{out_str}]")
+        # print(f"  [{mode} {qi}] question: {q}")  # debug
+        # print(f"  [{mode} {qi}] answer: {answer}")  # debug
 
     def agg(key):
         return [
             sum(r[key][l] for r in records) / len(records)
-            for l in range(NUM_LOOPS)
+            for l in range(args.num_loops)
         ]
 
     return {
@@ -112,18 +143,23 @@ def run_mode(model, tok, questions, mode, recording, captured_in, captured_out):
 
 
 def main():
-    tok = AutoTokenizer.from_pretrained(MODEL)
-    model = (
-        LlamaLoopedForCausalLM.from_pretrained(
-            MODEL,
-            num_loops=NUM_LOOPS,
-            recur_mode=RECUR_MODES[0],
-            skip_layers=SKIP_LAYERS,
-            dtype=torch.bfloat16,
-        )
-        .to(DEVICE)
-        .eval()
+    print("[INFO] Starting loop norms analysis...\n")
+    tok = AutoTokenizer.from_pretrained(args.model)
+    model = LlamaLoopedForCausalLM.from_pretrained(
+        args.model,
+        num_loops=args.num_loops,
+        recur_mode=args.recur_modes[0],
+        skip_layers=None,
+        dtype=torch.bfloat16,
     )
+
+    # If using LoRA, load and merge the adapter
+    if args.use_lora and os.path.exists(args.lora_adapter_dir):
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, args.lora_adapter_dir)
+        model = model.merge_and_unload()
+
+    model = model.to(args.device).eval()
 
     recording = {"on": False}
     captured_in: list[torch.Tensor] = []
@@ -140,9 +176,9 @@ def main():
     pre_handle = model.model.layers[0].register_forward_pre_hook(pre_hook)
     handle = model.model.layers[-1].register_forward_hook(hook)
 
-    questions = load_gsm8k_questions(N_SAMPLES)
+    questions = load_gsm8k_questions(args.n_samples)
     results = {}
-    for mode in RECUR_MODES:
+    for mode in args.recur_modes:
         print(f"\n### mode = {mode}")
         results[mode] = run_mode(
             model, tok, questions, mode, recording, captured_in, captured_out
@@ -154,34 +190,36 @@ def main():
     # ---- side-by-side comparison ----
     def print_table(title, key):
         print(f"\n=== {title} (mean over tokens & prompts) ===")
-        header = "  loop  " + "".join(f"{m:>16}" for m in RECUR_MODES)
+        header = "  loop  " + "".join(f"{m:>16}" for m in args.recur_modes)
         print(header)
-        for l in range(NUM_LOOPS):
+        for l in range(args.num_loops):
             row = f"  {l:>4}  " + "".join(
-                f"{results[m][key][l]:>16.3f}" for m in RECUR_MODES
+                f"{results[m][key][l]:>16.3f}" for m in args.recur_modes
             )
             print(row)
 
     print_table("per-loop input |h|", "agg_in")
     print_table("per-loop output |h|", "agg_out")
 
-    if len(RECUR_MODES) >= 2:
-        m0, m1 = RECUR_MODES[0], RECUR_MODES[1]
+    if len(args.recur_modes) >= 2:
+        m0, m1 = args.recur_modes[0], args.recur_modes[1]
         same = sum(
             results[m0]["records"][i]["answer"] == results[m1]["records"][i]["answer"]
-            for i in range(N_SAMPLES)
+            for i in range(args.n_samples)
         )
-        print(f"\n=== answers: {m0} vs {m1} identical: {same}/{N_SAMPLES} ===")
+        print(f"\n=== answers: {m0} vs {m1} identical: {same}/{args.n_samples} ===")
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = os.path.join(OUT_DIR, f"loop_norms_cmp_{ts}.json")
+    lora_suffix = "_lora" if args.use_lora else ""
+    out_path = os.path.join(args.output_dir, f"loop_norms_cmp{lora_suffix}_{ts}.json")
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(
             {
-                "model": MODEL,
-                "num_loops": NUM_LOOPS,
-                "recur_modes": RECUR_MODES,
-                "skip_layers": SKIP_LAYERS,
+                "model": args.model,
+                "num_loops": args.num_loops,
+                "recur_modes": args.recur_modes,
+                "skip_layers": None,
+                "use_lora": args.use_lora,
                 "questions": questions,
                 "results": results,
             },

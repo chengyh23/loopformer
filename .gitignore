@@ -4,6 +4,7 @@ eval_persona_extract/
 mmlu_activations/
 Ouro**/
 tmp/
+ckpts/
 mechanistic_analysis/*.npy
 mechanistic_analysis/*.png
 .env
