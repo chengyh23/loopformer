@@ -140,6 +140,14 @@ meta-llama/Llama-3.2-3B-Instruct (llama-3b)
 | llama-3b looped         | 0.0106 |
 | llama-3b looped w/ lora | 0.6535 |
 
+### Loop-Aligned CoT stepwise Supervision
+
+**Aligning loop depth with reasoning depth**: each loop iteration is supervised to decode one CoT step.
+Dataset: [GSM8K-Aug](https://huggingface.co/datasets/whynlp/gsm8k-aug), 
+
+
+Run `CUDA_VISIBLE_DEVICES=6 python train/train_lora_llamalooped_cot.py --model meta-llama/Llama-3.2-1B-Instruct --n-train 50000 --batch-size 64 --grad-accum 4 [--per-loop-lora]`
+
 ## Loop Norm Analysis
 
 num_loops=4

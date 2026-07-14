@@ -73,6 +73,11 @@ class LlamaLoopedModel(LlamaModel):
     config_class = LlamaLoopedConfig
 
     def __init__(self, config: LlamaConfig):
+        """
+        collect_loop_hiddens:
+            When True, forward() stores the final-norm'ed hidden state of every 
+            loop in self.loop_hiddens (used for per-loop deep supervision).
+        """
         super().__init__(config)
         self.num_loops = getattr(config, "num_loops", 1)
         self.recur_mode = getattr(config, "recur_mode", "latent")
@@ -83,6 +88,9 @@ class LlamaLoopedModel(LlamaModel):
         # Optional per-loop PEFT adapter names (see set_loop_adapters).
         self.loop_adapters: list[str] | None = None
         self._loop_adapter_hooks_registered = False
+        
+        self.collect_loop_hiddens = False
+        self.loop_hiddens: list[torch.Tensor] | None = None
         # Unembedding head for token/soft modes, set by the parent module and
         # kept in a list so it is not registered as a submodule here.
         self._unembed: list[torch.nn.Module] = []
@@ -179,6 +187,7 @@ class LlamaLoopedModel(LlamaModel):
         # Per-token embedding norm, used to rescale between loops in
         # "latent_renorm" (keeps each loop's input at the embedding magnitude).
         embed_norm = inputs_embeds.norm(dim=-1, keepdim=True)
+        self.loop_hiddens = [] if self.collect_loop_hiddens else None
         try:
             for current_loop in range(self.num_loops):
                 skip = self.skip_layers.get(current_loop, set())
@@ -203,6 +212,8 @@ class LlamaLoopedModel(LlamaModel):
                         use_cache=use_cache,
                         **loop_kwargs,
                     )
+                if self.loop_hiddens is not None:
+                    self.loop_hiddens.append(self.norm(hidden_states))
                 if current_loop == last:
                     continue
                 if self.recur_mode in ("token", "soft"):
@@ -220,6 +231,11 @@ class LlamaLoopedModel(LlamaModel):
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
+            # Per-loop normed hiddens ride in the output (not just on self) so
+            # they survive DataParallel, whose forward runs on module replicas.
+            hidden_states=(
+                tuple(self.loop_hiddens) if self.loop_hiddens is not None else None
+            ),
         )
 
 

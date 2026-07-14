@@ -16,7 +16,6 @@ Run (single GPU):
 Loss is logged to Weights & Biases when USE_WANDB=True (pip install wandb).
 """
 
-import argparse
 import os
 import sys
 
@@ -35,13 +34,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models.llama_looped import LlamaLoopedForCausalLM
 
+# Sibling import (train/ is on sys.path when this script is run directly;
+# `train.common` would be shadowed by the top-level train.py).
+from common import parse_args
+
 # ---- config ----
 NUM_LOOPS = 4
 RECUR_MODE = "latent"  # "latent" | "latent_renorm" | "token" | "soft"
 SKIP_LAYERS = None
 OUTPUT_DIR_BASE = "ckpts"  # actual dir: {OUTPUT_DIR_BASE}/{model_short}_looped_lora
 MAX_LEN = 1024
-N_TRAIN = None  # e.g. 2000 for a quick run; None = full train split
 
 # LoRA
 LORA_R = 16
@@ -55,18 +57,16 @@ LORA_TARGETS = [
 # TrainingArguments
 EPOCHS = 1
 LR = 2e-4
-BATCH_SIZE = 1
-GRAD_ACCUM = 16
 
 # Weights & Biases (pip install wandb; `wandb login` once).
 USE_WANDB = True
 WANDB_PROJECT = "llama_looped_lora"
 
 
-def build_dataset(tok):
+def build_dataset(tok, n_train=None):
     ds = load_dataset("gsm8k", "main", split="train")
-    if N_TRAIN:
-        ds = ds.select(range(N_TRAIN))
+    if n_train:
+        ds = ds.select(range(n_train))
 
     def format_example(ex):
         # Prompt = chat-templated user turn (masked in the loss); response =
@@ -90,24 +90,8 @@ def build_dataset(tok):
     return ds.map(format_example, remove_columns=ds.column_names)
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--model",
-        default="meta-llama/Llama-3.2-3B-Instruct",
-        help="HF model id or local path of the base model to loop and fine-tune",
-    )
-    parser.add_argument(
-        "--per-loop-lora",
-        action="store_true",
-        help="train a separate LoRA adapter for each loop instead of one "
-        "adapter shared across all loops",
-    )
-    return parser.parse_args()
-
-
 def main():
-    args_cli = parse_args()
+    args_cli = parse_args(__doc__)
     model_name = args_cli.model
     model_short = model_name.rstrip("/").split("/")[-1]
     per_loop_lora = args_cli.per_loop_lora
@@ -126,7 +110,7 @@ def main():
         tok.pad_token = tok.eos_token
     tok.padding_side = "right"  # right-pad for causal-LM training
 
-    train_ds = build_dataset(tok)
+    train_ds = build_dataset(tok, args_cli.n_train)
 
     model = LlamaLoopedForCausalLM.from_pretrained(
         model_name,
@@ -168,8 +152,8 @@ def main():
 
     args = TrainingArguments(
         output_dir=output_dir,
-        per_device_train_batch_size=BATCH_SIZE,
-        gradient_accumulation_steps=GRAD_ACCUM,
+        per_device_train_batch_size=args_cli.batch_size,
+        gradient_accumulation_steps=args_cli.grad_accum,
         num_train_epochs=EPOCHS,
         learning_rate=LR,
         lr_scheduler_type="cosine",
@@ -179,6 +163,9 @@ def main():
         save_strategy="epoch",
         report_to=(["wandb"] if USE_WANDB else "none"),
         run_name=run_name,
+        # Batch similar lengths together (less padding); lengths are computed
+        # from input_ids since this dataset has no "length" column.
+        train_sampling_strategy="group_by_length",
     )
 
     trainer = Trainer(
