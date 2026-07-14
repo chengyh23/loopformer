@@ -128,13 +128,17 @@ gsm8k metric: flexible-extract
 
 ## Llama Looped Finetuning w/ Lora
 
-meta-llama/Llama-3.2-3B-Instruct
+Run `CUDA_VISIBLE_DEVICES=6 python train/train_lora_llamalooped.py --model meta-llama/Llama-3.2-1B-Instruct`
+Enable per-loop adapter with `--per-loop-lora`
+
+meta-llama/Llama-3.2-3B-Instruct (llama-3b)
+
 
 |        Task          | GSM8K (flexible-extract) |
 |----------------------|-------|
-| llama                | 0.7718 |
-| llama looped         | 0.0106 |
-| llama looped w/ lora | 0.6535 |
+| llama-3b                | 0.7718 |
+| llama-3b looped         | 0.0106 |
+| llama-3b looped w/ lora | 0.6535 |
 
 ## Loop Norm Analysis
 

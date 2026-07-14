@@ -8,6 +8,7 @@ ckpts/
 mechanistic_analysis/*.npy
 mechanistic_analysis/*.png
 .env
+wandb/
 
 .DS_Store
 .idea

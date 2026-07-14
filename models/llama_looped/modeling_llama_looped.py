@@ -28,6 +28,27 @@ from transformers.models.llama.modeling_llama import LlamaForCausalLM, LlamaMode
 from .configuration_llama_looped import LlamaLoopedConfig
 
 
+def _loop_adapter_prehook(module, args, kwargs):
+    """Activate this loop's PEFT (LoRA) adapter before the decoder layer runs.
+
+    The adapter name arrives as a ``loop_adapter=`` kwarg so that, under gradient
+    checkpointing, it is captured in the checkpointed partial and re-applied on
+    the backward-pass replay — otherwise the replay would run with whatever
+    adapter the *last* loop left active and produce wrong gradients.
+    """
+    adapter = kwargs.pop("loop_adapter", None)
+    if adapter is not None:
+        for sub in module.modules():
+            # Duck-typed peft.BaseTunerLayer (avoids a hard peft dependency).
+            # Assign _active_adapter directly instead of set_adapter(): the
+            # latter sets requires_grad=False on the other adapters, which
+            # silently drops the gradients of every loop but the last one.
+            if hasattr(sub, "set_adapter") and hasattr(sub, "_active_adapter"):
+                if sub._active_adapter != [adapter]:
+                    sub._active_adapter = [adapter]
+    return args, kwargs
+
+
 def _parse_skip_layers(spec: Any) -> dict[int, set[int]]:
     """Normalize a skip spec into ``{loop_idx: {layer_idx, ...}}``.
 
@@ -59,12 +80,37 @@ class LlamaLoopedModel(LlamaModel):
             f"Unknown recur_mode: {self.recur_mode!r}"
         )
         self.skip_layers = _parse_skip_layers(getattr(config, "skip_layers", None))
+        # Optional per-loop PEFT adapter names (see set_loop_adapters).
+        self.loop_adapters: list[str] | None = None
+        self._loop_adapter_hooks_registered = False
         # Unembedding head for token/soft modes, set by the parent module and
         # kept in a list so it is not registered as a submodule here.
         self._unembed: list[torch.nn.Module] = []
 
     def set_skip_layers(self, spec: Any) -> None:
         self.skip_layers = _parse_skip_layers(spec)
+
+    def set_loop_adapters(self, adapter_names: list[str] | None) -> None:
+        """Use a different PEFT (LoRA) adapter for each loop iteration.
+
+        ``adapter_names[i]`` is activated while loop ``i`` runs. Requires the
+        model to be wrapped with peft and one adapter added per loop. Pass
+        ``None`` to fall back to the globally active adapter (shared loops).
+        """
+        if adapter_names is None:
+            self.loop_adapters = None
+            return
+        adapter_names = list(adapter_names)
+        if len(adapter_names) != self.num_loops:
+            raise ValueError(
+                f"need one adapter per loop ({self.num_loops}), got "
+                f"{len(adapter_names)}: {adapter_names}"
+            )
+        self.loop_adapters = adapter_names
+        if not self._loop_adapter_hooks_registered:
+            for layer in self.layers:
+                layer.register_forward_pre_hook(_loop_adapter_prehook, with_kwargs=True)
+            self._loop_adapter_hooks_registered = True
 
     def set_unembedding(self, head: torch.nn.Module) -> None:
         self._unembed = [head]
@@ -136,6 +182,13 @@ class LlamaLoopedModel(LlamaModel):
         try:
             for current_loop in range(self.num_loops):
                 skip = self.skip_layers.get(current_loop, set())
+                loop_kwargs = kwargs
+                if self.loop_adapters is not None:
+                    # Consumed by _loop_adapter_prehook before the layer forward.
+                    loop_kwargs = {
+                        **kwargs,
+                        "loop_adapter": self.loop_adapters[current_loop],
+                    }
                 for i, layer in enumerate(layers):
                     if i in skip:
                         continue
@@ -148,7 +201,7 @@ class LlamaLoopedModel(LlamaModel):
                         position_ids=position_ids,
                         past_key_values=past_key_values,
                         use_cache=use_cache,
-                        **kwargs,
+                        **loop_kwargs,
                     )
                 if current_loop == last:
                     continue
@@ -182,3 +235,6 @@ class LlamaLoopedForCausalLM(LlamaForCausalLM):
 
     def set_skip_layers(self, spec: Any) -> None:
         self.model.set_skip_layers(spec)
+
+    def set_loop_adapters(self, adapter_names: list[str] | None) -> None:
+        self.model.set_loop_adapters(adapter_names)
