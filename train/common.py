@@ -30,6 +30,13 @@ def parse_args(description=None):
         "batch-size * grad-accum * n_gpus)",
     )
     parser.add_argument(
+        "--final-step-weight",
+        type=float,
+        default=1.0,
+        help="(CoT script only) weight of the step-region tokens in the last "
+        "loop's CE loss; the answer region always has weight 1.0",
+    )
+    parser.add_argument(
         "--n-train",
         type=int,
         default=None,

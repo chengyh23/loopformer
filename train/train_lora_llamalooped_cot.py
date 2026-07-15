@@ -130,6 +130,9 @@ def build_dataset(tok, n_train=None):
             "attention_mask": [1] * seq_len,
             "loop_labels": loop_labels,
             "length": seq_len,  # for group_by_length (LengthGroupedSampler)
+            # First token of the answer span ("#### <answer>"), for weighting
+            # the last loop's CE (step region vs answer region).
+            "answer_start": min(spans[-1][0], seq_len),
         }
     # print(ds[0])   # debug
     ds = ds.map(format_example, remove_columns=ds.column_names, num_proc=8)
@@ -154,6 +157,9 @@ def make_collator(pad_token_id):
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
             "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
             "loop_labels": torch.tensor(loop_labels, dtype=torch.long),
+            "answer_start": torch.tensor(
+                [f["answer_start"] for f in features], dtype=torch.long
+            ),
         }
 
     return collate
@@ -163,13 +169,25 @@ class PerLoopTrainer(Trainer):
     """Reads per-loop hidden states off the looped model and applies the
     per-loop loss masks; the model's own lm_head/loss path is bypassed."""
 
-    def __init__(self, *args, looped_lm=None, aux_weight=AUX_WEIGHT, **kwargs):
+    def __init__(
+        self,
+        *args,
+        looped_lm=None,
+        aux_weight=AUX_WEIGHT,
+        final_step_weight=1.0,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.looped_lm = looped_lm  # unwrapped LlamaLoopedForCausalLM
         self.aux_weight = aux_weight
+        # Weight of step-region tokens in the last loop's CE (answer region is
+        # always 1.0). < 1 shifts the last loop's gradient toward the
+        # conclusion, leaving step generation mostly to the intermediate loops.
+        self.final_step_weight = final_step_weight
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         loop_labels = inputs["loop_labels"]  # (B, NUM_LOOPS, L)
+        answer_start = inputs["answer_start"]  # (B,)
         outputs = model(
             input_ids=inputs["input_ids"],
             attention_mask=inputs["attention_mask"],
@@ -189,7 +207,21 @@ class PerLoopTrainer(Trainer):
             # accelerate's mixed-precision wrapper converts model outputs to
             # fp32; cast back since lm_head runs outside the autocast ctx.
             logits = lm_head(h[:, :-1][mask].to(lm_head.weight.dtype))
-            ce = F.cross_entropy(logits.float(), labels[mask])
+            if i == last and self.final_step_weight != 1.0:
+                # Weighted mean: step tokens x final_step_weight, answer x 1.0.
+                # Label index j scores the token at position j + 1.
+                pos = torch.arange(1, labels.shape[1] + 1, device=labels.device)
+                weights = torch.where(
+                    pos.unsqueeze(0) >= answer_start.unsqueeze(1),
+                    1.0,
+                    self.final_step_weight,
+                )[mask]
+                ce_tok = F.cross_entropy(
+                    logits.float(), labels[mask], reduction="none"
+                )
+                ce = (ce_tok * weights).sum() / weights.sum()
+            else:
+                ce = F.cross_entropy(logits.float(), labels[mask])
             if i == last:
                 loss = ce
             else:
@@ -204,11 +236,17 @@ def main():
     model_name = args_cli.model
     model_short = model_name.rstrip("/").split("/")[-1]
     per_loop_lora = args_cli.per_loop_lora
-    suffix = "_perloop" if per_loop_lora else ""
+    # Same suffix for output_dir and run_name, so runs with different settings
+    # never overwrite each other's checkpoints.
+    suffix = ("_perloop" if per_loop_lora else "") + (
+        f"_fsw{args_cli.final_step_weight}"
+        if args_cli.final_step_weight != 1.0
+        else ""
+    )
     output_dir = os.path.join(OUTPUT_DIR_BASE, f"{model_short}_looped_lora_cot{suffix}")
     run_name = (
         f"{model_short}-gsm8kaug-cot-lora-{RECUR_MODE}-L{NUM_LOOPS}-r{LORA_R}"
-        + ("-perloop" if per_loop_lora else "")
+        + suffix.replace("_", "-")
     )
 
     if USE_WANDB:
@@ -288,6 +326,7 @@ def main():
         train_dataset=train_ds,
         data_collator=make_collator(tok.pad_token_id),
         looped_lm=looped_lm,
+        final_step_weight=args_cli.final_step_weight,
     )
     trainer.train()
 

@@ -148,6 +148,11 @@ meta-llama/Llama-3.2-3B-Instruct (llama-3b)
 | llama-1b looped w/ per-loop lora | 0.3730 |
 | llama-1b looped w/ lora w/ CoT-supervision (50k) | 0.2191 |
 | llama-1b looped w/ lora w/ CoT-supervision | 0.4329 |
+| llama-1b looped w/ lora w/ CoT-supervision (num_loops=3) | 0.4503 |
+| llama-1b looped w/ lora w/ CoT-supervision (num_loops=2) | 0.4208 |
+| llama-1b looped w/ lora w/ CoT-supervision (num_loops=1) | 0.3973 |
+| llama-1b looped w/ lora w/ CoT-supervision (num_loops=5) | 0.4102 |
+| llama-1b looped w/ lora w/ CoT-supervision (num_loops=6) | 0.3738 |
 
 ### Loop-Aligned CoT stepwise Supervision
 
@@ -156,6 +161,13 @@ Dataset: [GSM8K-Aug](https://huggingface.co/datasets/whynlp/gsm8k-aug),
 
 
 Run `CUDA_VISIBLE_DEVICES=6 python train/train_lora_llamalooped_cot.py --model meta-llama/Llama-3.2-1B-Instruct --n-train 50000 --batch-size 64 --grad-accum 4 [--per-loop-lora]`
+
+**Downweighting the final loop's step-region loss**
+
+Enable downweighting final loop's step-region tokens' CE (weighted mean: step tokens × `w`, answer tokens × 1.0) with `--final-step-weight 0.3`
+
+`w = 1.0` (default) is exactly the unweighted loss. the last loop is trained on the full response (all steps + answer), which duplicates the intermediate loops' step supervision and lets step tokens dominate over answer tokens — the last loop degenerates into ordinary SFT and dilutes the loop division of labor. 
+
 
 ## Loop Norm Analysis
 
