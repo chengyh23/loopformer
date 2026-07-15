@@ -40,8 +40,8 @@ def parse_args():
                         help="Use LoRA adapter if available")
     parser.add_argument("--no_lora", dest="use_lora", action="store_false",
                         help="Disable LoRA adapter")
-    parser.add_argument("--lora_adapter_dir", type=str, default="ckpts/llama_looped_lora/adapter",
-                        help="Path to LoRA adapter directory")
+    parser.add_argument("--lora_adapter_dir", type=str,
+                        help="Path to LoRA adapter directory, such as ckpts/llama_looped_lora/adapter")
     parser.add_argument("--tasks", type=str, nargs="+", default=["gsm8k"],
                         help="Tasks to evaluate (gsm8k, hellaswag, etc.)")
     parser.add_argument("--output_dir", type=str, default="eval/",
@@ -91,26 +91,54 @@ if args.backend == "vllm":
 elif args.backend == "hf":
     tok = AutoTokenizer.from_pretrained(args.model)
 
-    pretrained = LlamaLoopedForCausalLM.from_pretrained(
-        args.model,
-        num_loops=args.num_loops,
-        recur_mode=args.recur_mode,
-        dtype="bfloat16",
-    ).to("cuda") if args.use_looped else args.model
+    if args.use_looped:
+        pretrained = LlamaLoopedForCausalLM.from_pretrained(
+            args.model,
+            num_loops=args.num_loops,
+            recur_mode=args.recur_mode,
+            dtype="bfloat16",
+        ).to("cuda")
 
-    # lm = HFLM(
-    #     pretrained=pretrained,
-    #     tokenizer=tok,
-    #     batch_size="auto",
-    # )
+        if args.use_lora:
+            assert args.lora_adapter_dir, "--use_lora requires --lora_adapter_dir"
+            from peft import PeftModel
+
+            loop_names = [f"loop{i}" for i in range(args.num_loops)]
+            is_per_loop = all(
+                os.path.isdir(os.path.join(args.lora_adapter_dir, n))
+                for n in loop_names
+            )
+            if is_per_loop:
+                # One LoRA adapter per loop (dir holds loop0/, loop1/, ...).
+                # set_loop_adapters activates adapter loop{i} while loop i runs,
+                # via a per-decoder-layer forward pre-hook.
+                pretrained = PeftModel.from_pretrained(
+                    pretrained,
+                    os.path.join(args.lora_adapter_dir, loop_names[0]),
+                    adapter_name=loop_names[0],
+                )
+                for name in loop_names[1:]:
+                    pretrained.load_adapter(
+                        os.path.join(args.lora_adapter_dir, name), adapter_name=name
+                    )
+                pretrained.get_base_model().set_loop_adapters(loop_names)
+                print(f"[INFO] Loaded {args.num_loops} per-loop LoRA adapters: {loop_names}")
+            else:
+                # Single adapter shared across all loops.
+                pretrained = PeftModel.from_pretrained(pretrained, args.lora_adapter_dir)
+                print(f"[INFO] Loaded shared LoRA adapter from {args.lora_adapter_dir}")
+            pretrained = pretrained.to("cuda")
+    else:
+        pretrained = args.model
+
     model = "hf"
     model_args = {
         "pretrained": pretrained,
-        # "trust_remote_code": True,
+        "tokenizer": tok,
         "dtype": "bfloat16",
-        "device_map": "auto",  # Let transformers handle device placement
     }
-    batch_size = 1  # For long-generation tasks like GSM8K, batch_size=1 is more stable
+    # batch_size = 1
+    batch_size = "auto"
 
 else:
     raise ValueError(f"Unknown backend: {args.backend!r}")
@@ -124,14 +152,14 @@ results = lm_eval.simple_evaluate(
     # model=lm,
     tasks=args.tasks,
     limit=args.limit,
-    # batch_size=batch_size,
+    batch_size=batch_size,
     # max_batch_size=batch_size,
     # num_fewshot=0,
     # log_samples=False,  # Disable to reduce I/O
     # cache_requests=True,  # Cache requests
     # verbosity="INFO",
     apply_chat_template=True,  # Apply chat template for instruction-tuned models
-    gen_kwargs={"max_gen_toks": 256},  # Limit generation length
+    # gen_kwargs={"max_gen_toks": 256},  # Limit generation length
 )
 
 

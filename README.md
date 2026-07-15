@@ -128,8 +128,10 @@ gsm8k metric: flexible-extract
 
 ## Llama Looped Finetuning w/ Lora
 
-Run `CUDA_VISIBLE_DEVICES=6 python train/train_lora_llamalooped.py --model meta-llama/Llama-3.2-1B-Instruct`
+Train `CUDA_VISIBLE_DEVICES=6 python train/train_lora_llamalooped.py --model meta-llama/Llama-3.2-1B-Instruct`
 Enable per-loop adapter with `--per-loop-lora`
+
+Eval `CUDA_VISIBLE_DEVICES=5 python tests/test_lm_eval_llamalooped.py --use_looped --use_lora --model meta-llama/Llama-3.2-1B-Instruct --lora_adapter_dir ckpts/Llama-3.2-1B-Instruct_looped_lora/adapter --gpu_memory_utilization 0.3`
 
 meta-llama/Llama-3.2-3B-Instruct (llama-3b)
 
@@ -139,6 +141,13 @@ meta-llama/Llama-3.2-3B-Instruct (llama-3b)
 | llama-3b                | 0.7718 |
 | llama-3b looped         | 0.0106 |
 | llama-3b looped w/ lora | 0.6535 |
+| llama-3b looped w/ per-loop lora |  |
+| llama-1b                | 0.4246 |
+| llama-1b looped         | 0.0136 |
+| llama-1b looped w/ lora | 0.3465 |
+| llama-1b looped w/ per-loop lora | 0.3730 |
+| llama-1b looped w/ lora w/ CoT-supervision (50k) | 0.2191 |
+| llama-1b looped w/ lora w/ CoT-supervision | 0.4329 |
 
 ### Loop-Aligned CoT stepwise Supervision
 
