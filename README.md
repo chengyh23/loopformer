@@ -136,23 +136,32 @@ Eval `CUDA_VISIBLE_DEVICES=5 python tests/test_lm_eval_llamalooped.py --use_loop
 meta-llama/Llama-3.2-3B-Instruct (llama-3b)
 
 
-|        Task          | GSM8K (flexible-extract) |
-|----------------------|-------|
-| llama-3b                | 0.7718 |
-| llama-3b looped         | 0.0106 |
-| llama-3b looped w/ lora | 0.6535 |
-| llama-3b looped w/ per-loop lora |  |
-| llama-1b                | 0.4246 |
-| llama-1b looped         | 0.0136 |
-| llama-1b looped w/ lora | 0.3465 |
-| llama-1b looped w/ per-loop lora | 0.3730 |
-| llama-1b looped w/ lora w/ CoT-supervision (50k) | 0.2191 |
-| llama-1b looped w/ lora w/ CoT-supervision | 0.4329 |
-| llama-1b looped w/ lora w/ CoT-supervision (num_loops=3) | 0.4503 |
-| llama-1b looped w/ lora w/ CoT-supervision (num_loops=2) | 0.4208 |
-| llama-1b looped w/ lora w/ CoT-supervision (num_loops=1) | 0.3973 |
-| llama-1b looped w/ lora w/ CoT-supervision (num_loops=5) | 0.4102 |
-| llama-1b looped w/ lora w/ CoT-supervision (num_loops=6) | 0.3738 |
+|        Task                  | GSM8K (flexible-extract) | MBPP (pass_at_1) |
+|------------------------------|--------------------------|--------------|
+| llama-3b                                                | 0.7718 | |
+| llama-3b looped                                         | 0.0106 | |
+| llama-3b looped w/ lora                                 | 0.6535 | |
+| llama-3b looped w/ per-loop lora                        |  | |
+| llama-1b                                                | 0.4246 | 0.364 |
+| llama-1b looped                                         | 0.0136 | |
+| llama-1b looped w/ lora                                 | 0.3465 | |
+| llama-1b looped w/ per-loop lora                        | 0.3730 | |
+| llama-1b looped w/ lora w/ CoT-supervision (50k)        | 0.2191 | |
+| llama-1b looped w/ lora w/ CoT-supervision              | 0.4329 | 0 |
+| llama-1b looped w/ lora w/ CoT-supervision (num_loops=3) | 0.4503 | |
+| llama-1b looped w/ lora w/ CoT-supervision (num_loops=2) | 0.4208 | |
+| llama-1b looped w/ lora w/ CoT-supervision (num_loops=1) | 0.3973 | |
+| llama-1b looped w/ lora w/ CoT-supervision (num_loops=5) | 0.4102 | |
+| llama-1b looped w/ lora w/ CoT-supervision (num_loops=6) | 0.3738 | |
+| llama-1b w/ lora (gsm8k-aug SFT, no loop) | 0.4845 | |
+| llama-1b looped w/ lora w/ CoT-supervision w/fsw=0.3 | 0.4405 | 0 |
+
+
+**findings**
+1. **Naive looping is catastrophic; the failure is low-rank fixable.** Re-entering the decoder stack collapses accuracy (0.42 → 0.01) — the re-entry hidden states are far outside the input distribution each layer was trained on — yet a <1%-parameter LoRA recovers most of it, so the drift is largely correctable by a low-rank adaptation.
+2. **Loop-aligned stepwise supervision beats plain looped SFT** (0.4329 vs 0.3465) and yields a real depth curve: accuracy rises monotonically over eval loops 1 → 2 → 3 (0.397 → 0.421 → 0.450), then degrades beyond the trained depth (5, 6 loops). The loops are doing *something* — but see below.
+3. **The controlled comparison shows the gain comes from data, not from looping.** The same LoRA recipe on the same GSM8K-Aug data *without* looping reaches 0.4845 — above every looped variant (best: 0.4503). At matched data, 4× serial depth currently buys negative return.
+
 
 ### Loop-Aligned CoT stepwise Supervision
 

@@ -30,6 +30,13 @@ def parse_args(description=None):
         "batch-size * grad-accum * n_gpus)",
     )
     parser.add_argument(
+        "--num-loops",
+        type=int,
+        default=4,
+        help="number of times the decoder stack is looped "
+        "(1 = plain non-looped model, e.g. as a no-looping control)",
+    )
+    parser.add_argument(
         "--final-step-weight",
         type=float,
         default=1.0,

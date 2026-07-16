@@ -39,7 +39,6 @@ from models.llama_looped import LlamaLoopedForCausalLM
 from common import parse_args
 
 # ---- config ----
-NUM_LOOPS = 4
 RECUR_MODE = "latent"  # "latent" | "latent_renorm" | "token" | "soft"
 SKIP_LAYERS = None
 OUTPUT_DIR_BASE = "ckpts"  # actual dir: {OUTPUT_DIR_BASE}/{model_short}_looped_lora
@@ -95,11 +94,14 @@ def main():
     model_name = args_cli.model
     model_short = model_name.rstrip("/").split("/")[-1]
     per_loop_lora = args_cli.per_loop_lora
-    suffix = "_perloop" if per_loop_lora else ""
+    num_loops = args_cli.num_loops
+    suffix = (f"_L{num_loops}" if num_loops != 4 else "") + (
+        "_perloop" if per_loop_lora else ""
+    )
     output_dir = os.path.join(OUTPUT_DIR_BASE, f"{model_short}_looped_lora{suffix}")
     run_name = (
-        f"{model_short}-gsm8k-lora-{RECUR_MODE}-L{NUM_LOOPS}-r{LORA_R}"
-        + ("-perloop" if per_loop_lora else "")
+        f"{model_short}-gsm8k-lora-{RECUR_MODE}-L{num_loops}-r{LORA_R}"
+        + suffix.replace("_", "-")
     )
 
     if USE_WANDB:
@@ -114,7 +116,7 @@ def main():
 
     model = LlamaLoopedForCausalLM.from_pretrained(
         model_name,
-        num_loops=NUM_LOOPS,
+        num_loops=num_loops,
         recur_mode=RECUR_MODE,
         skip_layers=SKIP_LAYERS,
         dtype=torch.bfloat16,
@@ -134,7 +136,7 @@ def main():
         )
 
     if per_loop_lora:
-        adapter_names = [f"loop{i}" for i in range(NUM_LOOPS)]
+        adapter_names = [f"loop{i}" for i in range(num_loops)]
         model = get_peft_model(model, make_lora(), adapter_name=adapter_names[0])
         for name in adapter_names[1:]:
             model.add_adapter(name, make_lora())
@@ -185,7 +187,7 @@ def main():
     load_hint = (
         "load with:\n"
         f"  base = LlamaLoopedForCausalLM.from_pretrained('{model_name}',"
-        f" num_loops={NUM_LOOPS}, recur_mode='{RECUR_MODE}', dtype='bfloat16')\n"
+        f" num_loops={num_loops}, recur_mode='{RECUR_MODE}', dtype='bfloat16')\n"
         "  from peft import PeftModel\n"
     )
     if per_loop_lora:

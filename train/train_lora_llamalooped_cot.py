@@ -46,7 +46,6 @@ from models.llama_looped import LlamaLoopedForCausalLM
 from common import parse_args
 
 # ---- config ----
-NUM_LOOPS = 4
 RECUR_MODE = "latent"  # "latent" | "latent_renorm" | "token" | "soft"
 SKIP_LAYERS = None
 OUTPUT_DIR_BASE = "ckpts"  # actual dir: {OUTPUT_DIR_BASE}/{model_short}_looped_lora_cot
@@ -78,6 +77,8 @@ def chunk_spans(step_spans, ans_span, n_slots):
     ``< n_slots`` steps: one step per slot, leftover slots get the answer span.
     """
     # print(f"step_spans: {step_spans}, ans_span: {ans_span}, n_slots: {n_slots}")    # debug
+    if n_slots <= 0:  # num_loops=1: no intermediate loops, plain SFT
+        return []
     k_steps = len(step_spans)
     if k_steps >= n_slots:
         size, rem = divmod(k_steps, n_slots)
@@ -90,7 +91,7 @@ def chunk_spans(step_spans, ans_span, n_slots):
     return list(step_spans) + [ans_span] * (n_slots - k_steps)
 
 
-def build_dataset(tok, n_train=None):
+def build_dataset(tok, n_train=None, num_loops=4):
     ds = load_dataset("whynlp/gsm8k-aug", split="train")
     # ds = load_dataset("whynlp/gsm8k-aug", split="train[:30]")    # debug
     if n_train:
@@ -117,8 +118,8 @@ def build_dataset(tok, n_train=None):
         input_ids = input_ids[:MAX_LEN]
         seq_len = len(input_ids)
 
-        slot_spans = chunk_spans(spans[:-1], spans[-1], NUM_LOOPS - 1)
-        loop_labels = [[-100] * seq_len for _ in range(NUM_LOOPS)]
+        slot_spans = chunk_spans(spans[:-1], spans[-1], num_loops - 1)
+        loop_labels = [[-100] * seq_len for _ in range(num_loops)]
         for j, (a, b) in enumerate(slot_spans):
             loop_labels[j][a:min(b, seq_len)] = input_ids[a:min(b, seq_len)]
         # Last loop: full response, so autoregressive generation stays intact.
@@ -236,16 +237,21 @@ def main():
     model_name = args_cli.model
     model_short = model_name.rstrip("/").split("/")[-1]
     per_loop_lora = args_cli.per_loop_lora
+    num_loops = args_cli.num_loops
     # Same suffix for output_dir and run_name, so runs with different settings
     # never overwrite each other's checkpoints.
-    suffix = ("_perloop" if per_loop_lora else "") + (
-        f"_fsw{args_cli.final_step_weight}"
-        if args_cli.final_step_weight != 1.0
-        else ""
+    suffix = (
+        (f"_L{num_loops}" if num_loops != 4 else "")
+        + ("_perloop" if per_loop_lora else "")
+        + (
+            f"_fsw{args_cli.final_step_weight}"
+            if args_cli.final_step_weight != 1.0
+            else ""
+        )
     )
     output_dir = os.path.join(OUTPUT_DIR_BASE, f"{model_short}_looped_lora_cot{suffix}")
     run_name = (
-        f"{model_short}-gsm8kaug-cot-lora-{RECUR_MODE}-L{NUM_LOOPS}-r{LORA_R}"
+        f"{model_short}-gsm8kaug-cot-lora-{RECUR_MODE}-L{num_loops}-r{LORA_R}"
         + suffix.replace("_", "-")
     )
 
@@ -257,11 +263,11 @@ def main():
         tok.pad_token = tok.eos_token
     tok.padding_side = "right"  # right-pad for causal-LM training
 
-    train_ds = build_dataset(tok, args_cli.n_train)
+    train_ds = build_dataset(tok, args_cli.n_train, num_loops)
 
     model = LlamaLoopedForCausalLM.from_pretrained(
         model_name,
-        num_loops=NUM_LOOPS,
+        num_loops=num_loops,
         recur_mode=RECUR_MODE,
         skip_layers=SKIP_LAYERS,
         dtype=torch.bfloat16,
@@ -285,7 +291,7 @@ def main():
         )
 
     if per_loop_lora:
-        adapter_names = [f"loop{i}" for i in range(NUM_LOOPS)]
+        adapter_names = [f"loop{i}" for i in range(num_loops)]
         model = get_peft_model(model, make_lora(), adapter_name=adapter_names[0])
         for name in adapter_names[1:]:
             model.add_adapter(name, make_lora())
@@ -337,7 +343,7 @@ def main():
     load_hint = (
         "load with:\n"
         f"  base = LlamaLoopedForCausalLM.from_pretrained('{model_name}',"
-        f" num_loops={NUM_LOOPS}, recur_mode='{RECUR_MODE}', dtype='bfloat16')\n"
+        f" num_loops={num_loops}, recur_mode='{RECUR_MODE}', dtype='bfloat16')\n"
         "  from peft import PeftModel\n"
     )
     if per_loop_lora:

@@ -151,6 +151,7 @@ results = lm_eval.simple_evaluate(
     model_args=model_args,
     # model=lm,
     tasks=args.tasks,
+    confirm_run_unsafe_code=True,   # tasks: mbpp
     limit=args.limit,
     batch_size=batch_size,
     # max_batch_size=batch_size,
