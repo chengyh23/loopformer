@@ -146,6 +146,8 @@ else:
 
 print("[INFO] Starting evaluation...\n")
 
+import os
+os.environ["HF_ALLOW_CODE_EVAL"] = "1"  # tasks: mbpp
 results = lm_eval.simple_evaluate(
     model=model,
     model_args=model_args,

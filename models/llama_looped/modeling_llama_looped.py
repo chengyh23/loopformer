@@ -139,6 +139,89 @@ class LlamaLoopedModel(LlamaModel):
         cur = hidden_states.norm(dim=-1, keepdim=True).clamp_min(1e-6)
         return hidden_states / cur * target
 
+    def _block_forward(self, embeds, attention_mask_2d, position_ids, loop_adapter=None):
+        """One pass of the full decoder stack over ``embeds`` (no KV cache)."""
+        causal_mask = create_causal_mask(
+            config=self.config,
+            inputs_embeds=embeds,
+            attention_mask=attention_mask_2d,
+            past_key_values=None,
+            position_ids=position_ids,
+        )
+        position_embeddings = self.rotary_emb(embeds, position_ids=position_ids)
+        extra = {} if loop_adapter is None else {"loop_adapter": loop_adapter}
+        hidden = embeds
+        for layer in self.layers[: self.config.num_hidden_layers]:
+            hidden = layer(
+                hidden,
+                attention_mask=causal_mask,
+                position_embeddings=position_embeddings,
+                position_ids=position_ids,
+                use_cache=False,
+                **extra,
+            )
+        return hidden
+
+    def forward_latent_branches(self, input_ids, attention_mask, branch_ids, branch_mask):
+        """Latent-carry forward with a per-loop generative readout branch.
+
+        Loop ``i`` runs the stack over ``[latent(Q); embed(branch_i)]``: the
+        teacher-forced branch text (e.g. CoT step ``i``) reads Q's loop-``i``
+        representation through causal attention, but only the Q positions are
+        carried to loop ``i+1`` — branch text never enters later loops' token
+        stream, so the only inter-loop channel is the latent.
+
+        Args:
+            input_ids:      (B, Lq) right-padded question tokens.
+            attention_mask: (B, Lq) 1 on real question tokens.
+            branch_ids:     (B, num_loops, Lb) right-padded branch tokens.
+            branch_mask:    (B, num_loops, Lb) 1 on real branch tokens.
+
+        Returns a list with one normed readout (B, Lb, H) per loop, aligned so
+        that readout position ``j`` predicts branch token ``j`` (position 0 is
+        read from the last real Q token of each example).
+        """
+        assert self.recur_mode in ("latent", "latent_renorm"), (
+            "forward_latent_branches supports latent carry only, got "
+            f"{self.recur_mode!r}"
+        )
+        assert branch_ids.shape[1] == self.num_loops
+        bsz, q_len_padded = input_ids.shape
+        device = input_ids.device
+        q_lens = attention_mask.sum(dim=1)  # (B,)
+        q_pos = (
+            torch.arange(q_len_padded, device=device).unsqueeze(0).expand(bsz, -1)
+        )
+        batch_idx = torch.arange(bsz, device=device)
+        h = self.embed_tokens(input_ids)
+        embed_norm = h.norm(dim=-1, keepdim=True)
+        readouts = []
+        for i in range(self.num_loops):
+            b_ids = branch_ids[:, i]
+            lb = b_ids.shape[1]
+            embeds = torch.cat([h, self.embed_tokens(b_ids)], dim=1)
+            mask2d = torch.cat([attention_mask, branch_mask[:, i]], dim=1)
+            # Branch positions continue each example's real question length, so
+            # RoPE offsets are correct despite right padding (pad positions may
+            # collide with branch positions but are attention-masked anyway).
+            b_pos = q_lens.unsqueeze(1) + torch.arange(lb, device=device).unsqueeze(0)
+            pos = torch.cat([q_pos, b_pos], dim=1)
+            adapter = self.loop_adapters[i] if self.loop_adapters is not None else None
+            out = self._block_forward(embeds, mask2d, pos, loop_adapter=adapter)
+            # Readout position j predicts branch token j; position 0 reads from
+            # the last real Q token.
+            last_q = out[batch_idx, q_lens - 1].unsqueeze(1)
+            readout = torch.cat(
+                [last_q, out[:, q_len_padded : q_len_padded + lb - 1]], dim=1
+            )
+            readouts.append(self.norm(readout))
+            if i == self.num_loops - 1:
+                break
+            h = out[:, :q_len_padded]
+            if self.recur_mode == "latent_renorm":
+                h = self._renorm(h, embed_norm)
+        return readouts
+
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -254,3 +337,70 @@ class LlamaLoopedForCausalLM(LlamaForCausalLM):
 
     def set_loop_adapters(self, adapter_names: list[str] | None) -> None:
         self.model.set_loop_adapters(adapter_names)
+
+    def forward_latent_branches(self, *args, **kwargs):
+        return self.model.forward_latent_branches(*args, **kwargs)
+
+    @torch.no_grad()
+    def generate_latent(
+        self,
+        input_ids: torch.LongTensor,
+        attention_mask: torch.Tensor | None = None,
+        max_new_tokens: int = 64,
+        eos_token_id: int | None = None,
+    ) -> torch.LongTensor:
+        """Greedy decoding matching forward_latent_branches training.
+
+        Runs loops 0..N-2 over the question only (latent carry, no branch),
+        then generates the answer with single final-loop passes over
+        ``[latent(Q); generated tokens]`` — no CoT tokens are emitted and the
+        intermediate loops run exactly once regardless of answer length.
+
+        Returns only the generated tokens, (B, <= max_new_tokens).
+        """
+        m = self.model
+        bsz, q_len = input_ids.shape
+        device = input_ids.device
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids)
+        q_lens = attention_mask.sum(dim=1)
+        q_pos = torch.arange(q_len, device=device).unsqueeze(0).expand(bsz, -1)
+        embed_norm = None
+        h = m.embed_tokens(input_ids)
+        if m.recur_mode == "latent_renorm":
+            embed_norm = h.norm(dim=-1, keepdim=True)
+        adapters = m.loop_adapters or [None] * m.num_loops
+        for i in range(m.num_loops - 1):
+            h = m._block_forward(h, attention_mask, q_pos, loop_adapter=adapters[i])
+            if m.recur_mode == "latent_renorm":
+                h = m._renorm(h, embed_norm)
+
+        generated = torch.zeros(bsz, 0, dtype=torch.long, device=device)
+        done = torch.zeros(bsz, dtype=torch.bool, device=device)
+        for _ in range(max_new_tokens):
+            t = generated.shape[1]
+            embeds = torch.cat([h, m.embed_tokens(generated)], dim=1)
+            mask2d = torch.cat(
+                [attention_mask, torch.ones(bsz, t, dtype=attention_mask.dtype, device=device)],
+                dim=1,
+            )
+            g_pos = q_lens.unsqueeze(1) + torch.arange(t, device=device).unsqueeze(0)
+            pos = torch.cat([q_pos, g_pos], dim=1)
+            out = m._block_forward(embeds, mask2d, pos, loop_adapter=adapters[-1])
+            # Next-token position: last generated token, or last real Q token
+            # when nothing has been generated yet.
+            if t == 0:
+                read = out[torch.arange(bsz, device=device), q_lens - 1]
+            else:
+                read = out[:, -1]
+            logits = self.lm_head(m.norm(read))
+            next_tok = logits.argmax(dim=-1)
+            if eos_token_id is not None:
+                next_tok = torch.where(
+                    done, torch.full_like(next_tok, eos_token_id), next_tok
+                )
+                done = done | (next_tok == eos_token_id)
+            generated = torch.cat([generated, next_tok.unsqueeze(1)], dim=1)
+            if eos_token_id is not None and bool(done.all()):
+                break
+        return generated
