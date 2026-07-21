@@ -14,6 +14,9 @@ class LlamaLoopedConfig(LlamaConfig):
             "soft"   - next input = softmax(logits) @ E (soft bottleneck).
         skip_layers: Optional {loop_idx: layer_idx | [layer_idx, ...]} of layers
             to skip per loop (JSON string keys allowed).
+        use_loop_sandwichnorm: If True, each decoder layer uses a 4-norm
+            sandwich layout (ln_attn_inner/post_attn_ln/ln_mlp_inner/
+            post_mlp_ln) instead of the standard 2-norm pre-norm layout.
     """
 
     model_type = "llama_looped"
@@ -23,9 +26,11 @@ class LlamaLoopedConfig(LlamaConfig):
         num_loops: int = 1,
         recur_mode: str = "latent",
         skip_layers=None,
+        use_loop_sandwichnorm: bool = False,
         **kwargs,
     ):
         self.num_loops = num_loops
         self.recur_mode = recur_mode
         self.skip_layers = skip_layers
+        self.use_loop_sandwichnorm = use_loop_sandwichnorm
         super().__init__(**kwargs)

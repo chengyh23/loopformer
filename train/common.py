@@ -85,4 +85,13 @@ def parse_args(description=None):
         help="train on only the first N examples, e.g. 2000 for a quick run "
         "(default: full train split)",
     )
+    parser.add_argument(
+        "--sandwich-norm",
+        action="store_true",
+        help="use the 4-norm sandwich layout (ln_attn_inner/post_attn_ln/"
+        "ln_mlp_inner/post_mlp_ln) instead of the standard 2-norm pre-norm "
+        "layout; these norms are newly initialized (not in the pretrained "
+        "checkpoint) and are trained fully (not via LoRA) alongside the "
+        "existing LoRA adapters, with everything else left as configured",
+    )
     return parser.parse_args()

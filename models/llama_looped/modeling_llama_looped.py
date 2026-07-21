@@ -19,11 +19,16 @@ stays correct across loops.
 from typing import Any
 
 import torch
+from torch import nn
+
 from transformers import LlamaConfig
 from transformers.cache_utils import Cache, DynamicCache, DynamicLayer
 from transformers.masking_utils import create_causal_mask
 from transformers.modeling_outputs import BaseModelOutputWithPast
-from transformers.models.llama.modeling_llama import LlamaForCausalLM, LlamaModel
+from transformers.modeling_layers import GradientCheckpointingLayer
+from transformers.models.llama.modeling_llama import LlamaForCausalLM, LlamaModel, LlamaDecoderLayer, LlamaAttention, LlamaMLP, LlamaRMSNorm
+from transformers.processing_utils import Unpack
+from transformers.utils import TransformersKwargs
 
 from .configuration_llama_looped import LlamaLoopedConfig
 
@@ -47,6 +52,82 @@ def _loop_adapter_prehook(module, args, kwargs):
                 if sub._active_adapter != [adapter]:
                     sub._active_adapter = [adapter]
     return args, kwargs
+
+class LlamaLoopedDecoderLayer(GradientCheckpointingLayer):
+    def __init__(self, config: LlamaConfig, layer_idx: int):
+        super().__init__()
+        self.hidden_size = config.hidden_size
+
+        self.self_attn = LlamaAttention(config=config, layer_idx=layer_idx)
+
+        self.mlp = LlamaMLP(config)
+
+        self.use_loop_sandwichnorm = bool(getattr(config, "use_loop_sandwichnorm", False))
+        if self.use_loop_sandwichnorm:
+            self.ln_attn_inner = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.ln_mlp_inner = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.post_attn_ln = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.post_mlp_ln = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.input_layernorm = None
+            self.post_attention_layernorm = None
+        else:
+            self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        use_cache: bool | None = False,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> torch.Tensor:
+        if self.use_loop_sandwichnorm:
+            residual = hidden_states
+            hidden_states = self.ln_attn_inner(hidden_states)
+            # Self Attention
+            hidden_states, _ = self.self_attn(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                position_embeddings=position_embeddings,
+                **kwargs,
+            )
+            hidden_states = residual + hidden_states
+            hidden_states = self.post_attn_ln(hidden_states)
+            # Fully Connected
+            residual = hidden_states
+            hidden_states = self.ln_mlp_inner(hidden_states)
+            hidden_states = self.mlp(hidden_states)
+            hidden_states = residual + hidden_states
+            hidden_states = self.post_mlp_ln(hidden_states)
+            return hidden_states
+        
+        # Standard pre-norm path
+        residual = hidden_states
+        hidden_states = self.input_layernorm(hidden_states)
+        # Self Attention
+        hidden_states, _ = self.self_attn(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            position_embeddings=position_embeddings,
+            **kwargs,
+        )
+        hidden_states = residual + hidden_states
+
+        # Fully Connected
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+        return hidden_states
 
 
 def _parse_skip_layers(spec: Any) -> dict[int, set[int]]:
@@ -79,6 +160,10 @@ class LlamaLoopedModel(LlamaModel):
             loop in self.loop_hiddens (used for per-loop deep supervision).
         """
         super().__init__(config)
+        self.layers = nn.ModuleList(
+            [LlamaLoopedDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+        )
+
         self.num_loops = getattr(config, "num_loops", 1)
         self.recur_mode = getattr(config, "recur_mode", "latent")
         assert self.recur_mode in ("latent", "latent_renorm", "token", "soft"), (

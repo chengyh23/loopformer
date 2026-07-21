@@ -53,6 +53,10 @@ LORA_TARGETS = [
     "gate_proj", "up_proj", "down_proj",
 ]
 
+# Sandwich-norm submodule names (see LlamaLoopedDecoderLayer,
+# use_loop_sandwichnorm); trained fully (not via LoRA) when --sandwich-norm.
+SANDWICH_NORM_NAMES = ("ln_attn_inner", "ln_mlp_inner", "post_attn_ln", "post_mlp_ln")
+
 # TrainingArguments
 EPOCHS = 1
 LR = 2e-4
@@ -100,6 +104,7 @@ def main():
         (f"_L{num_loops}" if num_loops != 4 else "")
         + ("_perloop" if per_loop_lora else "")
         + (f"_prc{prc[0]}-{prc[1]}" if prc else "")
+        + ("_sandwich" if args_cli.sandwich_norm else "")
     )
     output_dir = os.path.join(OUTPUT_DIR_BASE, f"{model_short}_looped_lora{suffix}")
     run_name = (
@@ -122,6 +127,7 @@ def main():
         num_loops=num_loops,
         recur_mode=RECUR_MODE,
         skip_layers=SKIP_LAYERS,
+        use_loop_sandwichnorm=args_cli.sandwich_norm,
         dtype=torch.bfloat16,
     )
     if prc:
@@ -159,6 +165,15 @@ def main():
     else:
         adapter_names = None
         model = get_peft_model(model, make_lora())
+    if args_cli.sandwich_norm:
+        # Sandwich norms are newly initialized (not in the pretrained
+        # checkpoint) and shared across loops (same nn.Module reused every
+        # loop), so they're trained fully here rather than via LoRA/
+        # modules_to_save; get_peft_model froze them along with the rest of
+        # the base model, so unfreeze them explicitly.
+        for n, p in model.named_parameters():
+            if any(k in n for k in SANDWICH_NORM_NAMES):
+                p.requires_grad_(True)
     model.print_trainable_parameters()
 
     args = TrainingArguments(
@@ -193,10 +208,22 @@ def main():
     model.save_pretrained(adapter_dir)
     tok.save_pretrained(adapter_dir)
     print(f"saved LoRA adapter to: {adapter_dir}")
+    if args_cli.sandwich_norm:
+        # model.save_pretrained (peft) only persists LoRA params, not the
+        # manually-unfrozen sandwich norms, so save those separately.
+        norm_sd = {
+            k: v
+            for k, v in model.state_dict().items()
+            if any(s in k for s in SANDWICH_NORM_NAMES)
+        }
+        norm_path = os.path.join(adapter_dir, "sandwich_norms.pt")
+        torch.save(norm_sd, norm_path)
+        print(f"saved sandwich-norm weights to: {norm_path}")
     load_hint = (
         "load with:\n"
         f"  base = LlamaLoopedForCausalLM.from_pretrained('{model_name}',"
-        f" num_loops={num_loops}, recur_mode='{RECUR_MODE}', dtype='bfloat16')\n"
+        f" num_loops={num_loops}, recur_mode='{RECUR_MODE}',"
+        f" use_loop_sandwichnorm={args_cli.sandwich_norm}, dtype='bfloat16')\n"
         "  from peft import PeftModel\n"
     )
     if per_loop_lora:
@@ -212,6 +239,10 @@ def main():
         load_hint += f"  model.get_base_model().set_loop_adapters({adapter_names!r})"
     else:
         load_hint += f"  model = PeftModel.from_pretrained(base, '{adapter_dir}')"
+    if args_cli.sandwich_norm:
+        load_hint += (
+            f"\n  model.load_state_dict(torch.load('{norm_path}'), strict=False)"
+        )
     print(load_hint)
 
 

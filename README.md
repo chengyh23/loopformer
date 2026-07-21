@@ -125,6 +125,8 @@ gsm8k metric: flexible-extract
 | LlamaLooped recur (token) |  | 0.0159 |
 | LlamaLooped recur (soft) |  | 0.0068 |
 | LlamaLooped (2 loops) |  | 0.0144 |
+## Llama Looped w/ sandwich norm
+Run `python train/train_lora_llamalooped.py --model meta-llama/Llama-3.2-1B-Instruct --sandwich-norm`
 
 ## Llama Looped Finetuning w/ Lora
 
