@@ -10,8 +10,13 @@ import logging
 logging.basicConfig(level=logging.WARNING)
 
 # Make `models` importable when run as `python tests/test_lm_eval_llamalooped.py`.
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _ROOT)
+# train/common.py holds prc_skip_layers (`train.common` would be shadowed by
+# the top-level train.py, so import it as a sibling).
+sys.path.insert(0, os.path.join(_ROOT, "train"))
 from models.llama_looped import LlamaLoopedForCausalLM
+from common import prc_skip_layers
 
 import lm_eval
 from lm_eval.models.huggingface import HFLM
@@ -33,6 +38,11 @@ def parse_args():
                         help="Use vanilla baseline (no looping)")
     parser.add_argument("--num_loops", type=int, default=4,
                         help="Number of recurrent loops")
+    parser.add_argument("--prc", type=int, nargs=2, metavar=("PRELUDE", "CODA"),
+                        default=None,
+                        help="Prelude-Recurrent-Coda looping (must match how "
+                        "the adapter was trained): first PRELUDE / last CODA "
+                        "layers run once, only the middle block loops")
     parser.add_argument("--recur_mode", type=str, default="latent",
                         choices=["latent", "token", "soft"],
                         help="Recurrence mode: latent (residual), token (greedy argmax), or soft (softmax bottleneck)")
@@ -64,13 +74,23 @@ for key, value in vars(args).items():
     print(f"  {key:30s} = {value}")
 print("="*70 + "\n")
 
+# P-R-C skip dict (must match training). String keys, as in the vllm examples.
+skip_layers = None
+if args.prc:
+    from transformers import AutoConfig
+
+    n_layers = AutoConfig.from_pretrained(args.model).num_hidden_layers
+    skip = prc_skip_layers(args.prc[0], args.prc[1], n_layers, args.num_loops)
+    skip_layers = {str(k): v for k, v in (skip or {}).items()} or None
+    print(f"[INFO] P-R-C skip_layers: {skip_layers}")
+
 if args.backend == "vllm":
     if args.use_looped:
         hf_overrides_dict = {
             "architectures": ["LlamaLoopedForCausalLM"],
             "num_loops": args.num_loops,
             "recur_mode": args.recur_mode,
-            "skip_layers": None,
+            "skip_layers": skip_layers,
         }
     else:
         hf_overrides_dict = {}
@@ -98,6 +118,8 @@ elif args.backend == "hf":
             recur_mode=args.recur_mode,
             dtype="bfloat16",
         ).to("cuda")
+        if skip_layers:
+            pretrained.set_skip_layers(skip_layers)
 
         if args.use_lora:
             assert args.lora_adapter_dir, "--use_lora requires --lora_adapter_dir"

@@ -43,7 +43,7 @@ from models.llama_looped import LlamaLoopedForCausalLM
 
 # Sibling import (train/ is on sys.path when this script is run directly;
 # `train.common` would be shadowed by the top-level train.py).
-from common import parse_args
+from common import parse_args, prc_skip_layers
 
 # ---- config ----
 RECUR_MODE = "latent"  # "latent" | "latent_renorm" | "token" | "soft"
@@ -238,6 +238,7 @@ def main():
     model_short = model_name.rstrip("/").split("/")[-1]
     per_loop_lora = args_cli.per_loop_lora
     num_loops = args_cli.num_loops
+    prc = args_cli.prc  # None or [prelude, coda]
     # Same suffix for output_dir and run_name, so runs with different settings
     # never overwrite each other's checkpoints.
     suffix = (
@@ -248,6 +249,7 @@ def main():
             if args_cli.final_step_weight != 1.0
             else ""
         )
+        + (f"_prc{prc[0]}-{prc[1]}" if prc else "")
     )
     output_dir = os.path.join(OUTPUT_DIR_BASE, f"{model_short}_looped_lora_cot{suffix}")
     run_name = (
@@ -272,6 +274,12 @@ def main():
         skip_layers=SKIP_LAYERS,
         dtype=torch.bfloat16,
     )
+    if prc:
+        skip = prc_skip_layers(
+            prc[0], prc[1], model.config.num_hidden_layers, num_loops
+        )
+        model.set_skip_layers(skip)
+        print(f"[INFO] P-R-C skip_layers: {skip}")
     model.config.use_cache = False  # required with gradient checkpointing
     use_gradient_checkpointing = True  # True for memory savings, but slower
     if use_gradient_checkpointing == True:

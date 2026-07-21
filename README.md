@@ -155,12 +155,14 @@ meta-llama/Llama-3.2-3B-Instruct (llama-3b)
 | llama-1b looped w/ lora w/ CoT-supervision (num_loops=6) | 0.3738 | |
 | llama-1b w/ lora (gsm8k-aug SFT, no loop) | **0.4845** | 0.354 |
 | llama-1b looped w/ lora w/ CoT-supervision w/fsw=0.3 | 0.4405 | 0 |
+| llama-1b looped w/ lora w/ CoT-supervision w/fsw=0.0 | 0.0455 | |
+| llama-1b looped prelude2-coda2 w/ lora                  | 0.3146 | |
+| llama-1b looped prelude4-coda4 w/ lora                  | 0.3146 | |
 
 
 **findings**
-1. **Naive looping is catastrophic; the failure is low-rank fixable.** Re-entering the decoder stack collapses accuracy (0.42 → 0.01) — the re-entry hidden states are far outside the input distribution each layer was trained on — yet a <1%-parameter LoRA recovers most of it, so the drift is largely correctable by a low-rank adaptation.
-2. **Loop-aligned stepwise supervision beats plain looped SFT** (0.4329 vs 0.3465) and yields a real depth curve: accuracy rises monotonically over eval loops 1 → 2 → 3 (0.397 → 0.421 → 0.450), then degrades beyond the trained depth (5, 6 loops). The loops are doing *something* — but see below.
-3. **The controlled comparison shows the gain comes from data, not from looping.** The same LoRA recipe on the same GSM8K-Aug data *without* looping reaches 0.4845 — above every looped variant (best: 0.4503). At matched data, 4× serial depth currently buys negative return.
+- **Naive looping is catastrophic; the failure is low-rank fixable.** Re-entering the decoder stack collapses accuracy (0.42 → 0.01) — the re-entry hidden states are far outside the input distribution each layer was trained on — yet a <1%-parameter LoRA recovers most of it, so the drift is largely correctable by a low-rank adaptation.
+- **The controlled comparison shows the gain comes from data, not from looping.** The same LoRA recipe on the same GSM8K-Aug data *without* looping reaches 0.4845 — above every looped variant (best: 0.4503). At matched data, 4× serial depth currently buys negative return.
 
 
 ### Loop-Aligned CoT stepwise Supervision
@@ -183,6 +185,10 @@ Run `CUDA_VISIBLE_DEVICES=6 python train/train_lora_llamalooped_latent.py --mode
 
 Eval `tests/eval_latent_gsm8k.py` with adapter in `ckpts/Llama-3.2-1B-Instruct_looped_lora_latent_perloop`
 
+### Prelude-Recursive core-Coda 
+Run `CUDA_VISIBLE_DEVICES=6 python train/train_lora_llamalooped.py --model meta-llama/Llama-3.2-1B-Instruct --prc 2 2`
+
+Eval `python tests/test_lm_eval_llamalooped.py --use_looped --use_lora --model meta-llama/Llama-3.2-1B-Instruct --lora_adapter_dir ckpts/Llama-3.2-1B-Instruct_looped_lora_cot_prc2-2/adapter --prc 2 2 --gpu_memory_utilization 0.3`
 ## Loop Norm Analysis
 
 num_loops=4
