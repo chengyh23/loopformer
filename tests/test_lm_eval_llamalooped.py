@@ -52,6 +52,13 @@ def parse_args():
                         help="Disable LoRA adapter")
     parser.add_argument("--lora_adapter_dir", type=str,
                         help="Path to LoRA adapter directory, such as ckpts/llama_looped_lora/adapter")
+    parser.add_argument("--sandwich_norm", action="store_true",
+                        help="Model was trained with the 4-norm sandwich layout; "
+                        "loads sandwich_norms.pt from the adapter dir (hf backend only)")
+    parser.add_argument("--loop_attn_res", action="store_true",
+                        help="Model was trained with Attention Residuals over the "
+                        "loop-depth; loads loop_attn_res.pt from the adapter dir "
+                        "(hf backend only)")
     parser.add_argument("--tasks", type=str, nargs="+", default=["gsm8k"],
                         help="Tasks to evaluate (gsm8k, hellaswag, etc.)")
     parser.add_argument("--output_dir", type=str, default="eval/",
@@ -83,6 +90,16 @@ if args.prc:
     skip = prc_skip_layers(args.prc[0], args.prc[1], n_layers, args.num_loops)
     skip_layers = {str(k): v for k, v in (skip or {}).items()} or None
     print(f"[INFO] P-R-C skip_layers: {skip_layers}")
+
+if args.backend == "vllm" and (args.sandwich_norm or args.loop_attn_res):
+    # These are trained fully and saved as separate .pt files (not in the base
+    # checkpoint or the LoRA adapter); vLLM only loads base + LoRA weights and
+    # will silently run with un-trained (freshly-initialized) sandwich/AttnRes
+    # weights. Use the hf backend to eval such checkpoints.
+    raise SystemExit(
+        "[ERROR] --sandwich_norm / --loop_attn_res require --backend hf "
+        "(vLLM cannot load the separately-saved *.pt weights)."
+    )
 
 if args.backend == "vllm":
     if args.use_looped:
@@ -116,6 +133,8 @@ elif args.backend == "hf":
             args.model,
             num_loops=args.num_loops,
             recur_mode=args.recur_mode,
+            use_loop_sandwichnorm=args.sandwich_norm,
+            use_loop_attn_residual=args.loop_attn_res,
             dtype="bfloat16",
         ).to("cuda")
         if skip_layers:
@@ -150,6 +169,26 @@ elif args.backend == "hf":
                 pretrained = PeftModel.from_pretrained(pretrained, args.lora_adapter_dir)
                 print(f"[INFO] Loaded shared LoRA adapter from {args.lora_adapter_dir}")
             pretrained = pretrained.to("cuda")
+
+        # Sandwich norms / AttnRes are trained fully (not LoRA) and saved as
+        # separate .pt files; their state-dict keys were saved from the (peft-
+        # wrapped) model, so load them into the current model with strict=False.
+        import torch
+
+        for fname, flag in (
+            ("sandwich_norms.pt", args.sandwich_norm),
+            ("loop_attn_res.pt", args.loop_attn_res),
+        ):
+            if not flag:
+                continue
+            assert args.lora_adapter_dir, f"--{fname[:-3]} requires --lora_adapter_dir"
+            path = os.path.join(args.lora_adapter_dir, fname)
+            if not os.path.exists(path):
+                raise FileNotFoundError(f"{path} not found (needed to eval this model)")
+            sd = torch.load(path, map_location="cuda")
+            _, unexpected = pretrained.load_state_dict(sd, strict=False)
+            assert not unexpected, f"unexpected keys loading {fname}: {unexpected}"
+            print(f"[INFO] Loaded {len(sd)} tensors from {path}")
     else:
         pretrained = args.model
 

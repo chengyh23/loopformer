@@ -62,6 +62,9 @@ def parse_args():
                         help="Disable LoRA adapter")
     parser.add_argument("--lora_adapter_dir", type=str, default="ckpts/llama_looped_lora/adapter",
                         help="Path to LoRA adapter directory")
+    parser.add_argument("--use_loop_attn_residual", action="store_true",
+                        help="Model was trained with Attention Residuals over the "
+                        "loop-depth; loads loop_attn_res.pt from the adapter dir")
     parser.add_argument("--n_samples", type=int, default=10,
                         help="Number of samples to evaluate (None = full test set)")
     parser.add_argument("--max_new_tokens", type=int, default=256,
@@ -85,6 +88,7 @@ def main():
         args.model,
         num_loops=args.num_loops,
         recur_mode=args.recur_mode,
+        use_loop_attn_residual=args.use_loop_attn_residual,
         dtype=torch.bfloat16,
     )
 
@@ -94,6 +98,16 @@ def main():
         from peft import PeftModel
         model = PeftModel.from_pretrained(model, args.lora_adapter_dir)
         model = model.merge_and_unload()
+
+    # AttnRes weights are trained fully (not LoRA) and saved separately; load
+    # them after the LoRA merge (they are untouched by merge_and_unload).
+    if args.use_loop_attn_residual:
+        attn_res_path = os.path.join(args.lora_adapter_dir, "loop_attn_res.pt")
+        if os.path.exists(attn_res_path):
+            print(f"[INFO] Loading loop-attn-res weights from {attn_res_path}")
+            model.load_state_dict(torch.load(attn_res_path), strict=False)
+        else:
+            print(f"[WARN] --use_loop_attn_residual set but {attn_res_path} not found")
 
     model = model.to(args.device).eval()
     print(f"[INFO] Model ready on {args.device}\n")

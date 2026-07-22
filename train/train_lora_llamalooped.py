@@ -57,6 +57,10 @@ LORA_TARGETS = [
 # use_loop_sandwichnorm); trained fully (not via LoRA) when --sandwich-norm.
 SANDWICH_NORM_NAMES = ("ln_attn_inner", "ln_mlp_inner", "post_attn_ln", "post_mlp_ln")
 
+# AttnRes submodule name (see LoopAttnResidual); trained fully (not via LoRA)
+# and saved separately when --loop-attn-res.
+LOOP_ATTN_RES_NAME = "loop_attn_res"
+
 # TrainingArguments
 EPOCHS = 1
 LR = 2e-4
@@ -128,6 +132,7 @@ def main():
         recur_mode=RECUR_MODE,
         skip_layers=SKIP_LAYERS,
         use_loop_sandwichnorm=args_cli.sandwich_norm,
+        use_loop_attn_residual=args_cli.loop_attn_res,
         dtype=torch.bfloat16,
     )
     if prc:
@@ -174,6 +179,13 @@ def main():
         for n, p in model.named_parameters():
             if any(k in n for k in SANDWICH_NORM_NAMES):
                 p.requires_grad_(True)
+    if args_cli.loop_attn_res:
+        # AttnRes weights are newly initialized (not in the pretrained
+        # checkpoint) and were frozen by get_peft_model along with the base
+        # model; train them fully, like the sandwich norms above.
+        for n, p in model.named_parameters():
+            if LOOP_ATTN_RES_NAME in n:
+                p.requires_grad_(True)
     model.print_trainable_parameters()
 
     args = TrainingArguments(
@@ -219,11 +231,23 @@ def main():
         norm_path = os.path.join(adapter_dir, "sandwich_norms.pt")
         torch.save(norm_sd, norm_path)
         print(f"saved sandwich-norm weights to: {norm_path}")
+    if args_cli.loop_attn_res:
+        # peft's save_pretrained only persists LoRA params; save the fully-
+        # trained AttnRes weights separately.
+        attn_res_sd = {
+            k: v
+            for k, v in model.state_dict().items()
+            if LOOP_ATTN_RES_NAME in k
+        }
+        attn_res_path = os.path.join(adapter_dir, "loop_attn_res.pt")
+        torch.save(attn_res_sd, attn_res_path)
+        print(f"saved loop-attn-res weights to: {attn_res_path}")
     load_hint = (
         "load with:\n"
         f"  base = LlamaLoopedForCausalLM.from_pretrained('{model_name}',"
         f" num_loops={num_loops}, recur_mode='{RECUR_MODE}',"
-        f" use_loop_sandwichnorm={args_cli.sandwich_norm}, dtype='bfloat16')\n"
+        f" use_loop_sandwichnorm={args_cli.sandwich_norm},"
+        f" use_loop_attn_residual={args_cli.loop_attn_res}, dtype='bfloat16')\n"
         "  from peft import PeftModel\n"
     )
     if per_loop_lora:
@@ -242,6 +266,10 @@ def main():
     if args_cli.sandwich_norm:
         load_hint += (
             f"\n  model.load_state_dict(torch.load('{norm_path}'), strict=False)"
+        )
+    if args_cli.loop_attn_res:
+        load_hint += (
+            f"\n  model.load_state_dict(torch.load('{attn_res_path}'), strict=False)"
         )
     print(load_hint)
 

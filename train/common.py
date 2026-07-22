@@ -94,4 +94,14 @@ def parse_args(description=None):
         "checkpoint) and are trained fully (not via LoRA) alongside the "
         "existing LoRA adapters, with everything else left as configured",
     )
+    parser.add_argument(
+        "--loop-attn-res",
+        action="store_true",
+        help="apply Attention Residuals (Moonshot AttnRes) over the unrolled "
+        "loop-depth: each layer's input is a learned softmax attention over all "
+        "prior layer outputs, and the LM-head input is a readout attention over "
+        "all of them (requires a latent-family recur_mode). These weights are "
+        "newly initialized and trained fully (not via LoRA), saved separately "
+        "as loop_attn_res.pt",
+    )
     return parser.parse_args()

@@ -53,6 +53,42 @@ def _loop_adapter_prehook(module, args, kwargs):
                     sub._active_adapter = [adapter]
     return args, kwargs
 
+
+class LoopAttnResidual(nn.Module):
+    """Attention Residuals (Moonshot AttnRes) over the unrolled loop-depth.
+
+    Replaces the fixed residual carry between layer executions with a learned,
+    input-dependent softmax attention over depth: each consuming ``(loop, layer)``
+    position holds a pseudo-query ``w`` that attends over the key-normalized
+    outputs of every prior layer execution (plus the input embedding), producing
+    a per-token convex combination ``h = sum_i softmax(w . K_i) V_i``.
+
+    ``pos`` indexes the consuming position (``current_loop * num_layers + i``);
+    the final readout uses a dedicated query over all stored representations.
+    """
+
+    def __init__(self, hidden_size: int, num_positions: int, eps: float):
+        super().__init__()
+        self.norm = LlamaRMSNorm(hidden_size, eps=eps)  # key-norm, reused
+        # Zero-init => uniform softmax => starts as a plain average of priors.
+        self.query = nn.Parameter(torch.zeros(num_positions, hidden_size))
+        self.readout_query = nn.Parameter(torch.zeros(hidden_size))
+
+    def _aggregate(self, reprs: list[torch.Tensor], w: torch.Tensor) -> torch.Tensor:
+        V = torch.stack(reprs, dim=0)  # [N, B, T, D]
+        K = self.norm(V)
+        logits = torch.einsum("d,nbtd->nbt", w, K)  # [N, B, T]
+        # softmax in fp32 for bf16 stability (mirrors _reembed).
+        alpha = logits.float().softmax(dim=0).to(V.dtype)
+        return torch.einsum("nbt,nbtd->btd", alpha, V)  # [B, T, D]
+
+    def forward(self, reprs: list[torch.Tensor], pos: int) -> torch.Tensor:
+        return self._aggregate(reprs, self.query[pos])
+
+    def readout(self, reprs: list[torch.Tensor]) -> torch.Tensor:
+        return self._aggregate(reprs, self.readout_query)
+
+
 class LlamaLoopedDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: LlamaConfig, layer_idx: int):
         super().__init__()
@@ -170,6 +206,19 @@ class LlamaLoopedModel(LlamaModel):
             f"Unknown recur_mode: {self.recur_mode!r}"
         )
         self.skip_layers = _parse_skip_layers(getattr(config, "skip_layers", None))
+        # Attention Residuals over the unrolled loop-depth (Moonshot AttnRes).
+        # When enabled, each layer's input is a learned softmax attention over
+        # all prior layer outputs, and the recur_mode carry is subsumed.
+        self.use_loop_attn_residual = bool(getattr(config, "use_loop_attn_residual", False))
+        if self.use_loop_attn_residual:
+            assert self.recur_mode in ("latent", "latent_renorm"), (
+                "use_loop_attn_residual requires a latent-family recur_mode "
+                f"(token/soft bottleneck cannot compose), got {self.recur_mode!r}"
+            )
+            num_positions = self.num_loops * config.num_hidden_layers
+            self.loop_attn_res = LoopAttnResidual(
+                config.hidden_size, num_positions, config.rms_norm_eps
+            )
         # Optional per-loop PEFT adapter names (see set_loop_adapters).
         self.loop_adapters: list[str] | None = None
         self._loop_adapter_hooks_registered = False
@@ -356,6 +405,9 @@ class LlamaLoopedModel(LlamaModel):
         # "latent_renorm" (keeps each loop's input at the embedding magnitude).
         embed_norm = inputs_embeds.norm(dim=-1, keepdim=True)
         self.loop_hiddens = [] if self.collect_loop_hiddens else None
+        # AttnRes: stack of every prior layer-execution output (+ embedding),
+        # attended over depth to form each layer's input. h_0 = inputs_embeds.
+        reprs = [inputs_embeds] if self.use_loop_attn_residual else None
         try:
             for current_loop in range(self.num_loops):
                 skip = self.skip_layers.get(current_loop, set())
@@ -369,10 +421,18 @@ class LlamaLoopedModel(LlamaModel):
                 for i, layer in enumerate(layers):
                     if i in skip:
                         continue
-                    # Route this (loop, layer) to its own KV-cache slot.
-                    layer.self_attn.layer_idx = current_loop * num_layers + i
+                    # Route this (loop, layer) to its own KV-cache slot; the same
+                    # global index selects this position's AttnRes query.
+                    gpos = current_loop * num_layers + i
+                    layer.self_attn.layer_idx = gpos
+                    if self.use_loop_attn_residual:
+                        # Input = depth-attention over all prior outputs (causal
+                        # in depth: reprs holds positions < gpos at read time).
+                        layer_input = self.loop_attn_res(reprs, gpos)
+                    else:
+                        layer_input = hidden_states
                     hidden_states = layer(
-                        hidden_states,
+                        layer_input,
                         attention_mask=causal_mask,
                         position_embeddings=position_embeddings,
                         position_ids=position_ids,
@@ -380,9 +440,15 @@ class LlamaLoopedModel(LlamaModel):
                         use_cache=use_cache,
                         **loop_kwargs,
                     )
+                    if self.use_loop_attn_residual:
+                        reprs.append(hidden_states)
                 if self.loop_hiddens is not None:
                     self.loop_hiddens.append(self.norm(hidden_states))
                 if current_loop == last:
+                    continue
+                # AttnRes subsumes the inter-loop carry (aggregation already
+                # spans loop boundaries), so skip the recur_mode hand-off.
+                if self.use_loop_attn_residual:
                     continue
                 if self.recur_mode in ("token", "soft"):
                     # Discrete/soft bottleneck: decode and re-embed for next loop.
@@ -395,6 +461,9 @@ class LlamaLoopedModel(LlamaModel):
             for layer, idx in zip(layers, base_idx):
                 layer.self_attn.layer_idx = idx
 
+        if self.use_loop_attn_residual:
+            # Final readout: attention over all stored representations.
+            hidden_states = self.loop_attn_res.readout(reprs)
         hidden_states = self.norm(hidden_states)
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,

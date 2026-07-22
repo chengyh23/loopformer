@@ -128,6 +128,9 @@ gsm8k metric: flexible-extract
 ## Llama Looped w/ sandwich norm
 Run `python train/train_lora_llamalooped.py --model meta-llama/Llama-3.2-1B-Instruct --sandwich-norm`
 
+## Llama Looped w/ AttnRes
+`LoopAttnResidual`: aggregates prior hidden states.
+
 ## Llama Looped Finetuning w/ Lora
 
 Train `CUDA_VISIBLE_DEVICES=6 python train/train_lora_llamalooped.py --model meta-llama/Llama-3.2-1B-Instruct`
