@@ -70,9 +70,18 @@ class LoopAttnResidual(nn.Module):
     def __init__(self, hidden_size: int, num_positions: int, eps: float):
         super().__init__()
         self.norm = LlamaRMSNorm(hidden_size, eps=eps)  # key-norm, reused
-        # Zero-init => uniform softmax => starts as a plain average of priors.
         self.query = nn.Parameter(torch.zeros(num_positions, hidden_size))
         self.readout_query = nn.Parameter(torch.zeros(hidden_size))
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        # Zero-init => uniform softmax => starts as a plain average of priors.
+        # query/readout_query are bare nn.Parameters, so the model's
+        # _init_weights (which only knows Linear/Embedding/RMSNorm) skips them;
+        # from_pretrained would otherwise leave them as uninitialized (NaN)
+        # memory. LlamaLooped{Model,ForCausalLM}._init_weights call this.
+        nn.init.zeros_(self.query)
+        nn.init.zeros_(self.readout_query)
 
     def _aggregate(self, reprs: list[torch.Tensor], w: torch.Tensor) -> torch.Tensor:
         V = torch.stack(reprs, dim=0)  # [N, B, T, D]
@@ -228,6 +237,13 @@ class LlamaLoopedModel(LlamaModel):
         # Unembedding head for token/soft modes, set by the parent module and
         # kept in a list so it is not registered as a submodule here.
         self._unembed: list[torch.nn.Module] = []
+
+    def _init_weights(self, module):
+        super()._init_weights(module)
+        # LoopAttnResidual holds bare nn.Parameters the base _init_weights
+        # doesn't touch; from_pretrained would leave them uninitialized (NaN).
+        if isinstance(module, LoopAttnResidual):
+            module.reset_parameters()
 
     def set_skip_layers(self, spec: Any) -> None:
         self.skip_layers = _parse_skip_layers(spec)
@@ -485,6 +501,13 @@ class LlamaLoopedForCausalLM(LlamaForCausalLM):
         # Give the model the head for token/soft recurrence.
         self.model.set_unembedding(self.lm_head)
         self.post_init()
+
+    def _init_weights(self, module):
+        super()._init_weights(module)
+        # See LlamaLoopedModel._init_weights: zero-init the bare AttnRes params
+        # that from_pretrained would otherwise leave as uninitialized (NaN).
+        if isinstance(module, LoopAttnResidual):
+            module.reset_parameters()
 
     def set_skip_layers(self, spec: Any) -> None:
         self.model.set_skip_layers(spec)

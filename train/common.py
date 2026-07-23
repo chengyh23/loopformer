@@ -86,6 +86,13 @@ def parse_args(description=None):
         "(default: full train split)",
     )
     parser.add_argument(
+        "--dataset",
+        default="gsm8k",
+        help="training dataset: 'gsm8k' (plain GSM8K, default) or "
+        "'whynlp/gsm8k-aug' (steps + answer joined into the same "
+        "reasoning+#### answer response shape)",
+    )
+    parser.add_argument(
         "--sandwich-norm",
         action="store_true",
         help="use the 4-norm sandwich layout (ln_attn_inner/post_attn_ln/"

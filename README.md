@@ -128,7 +128,11 @@ gsm8k metric: flexible-extract
 ## Llama Looped w/ sandwich norm
 Run `python train/train_lora_llamalooped.py --model meta-llama/Llama-3.2-1B-Instruct --sandwich-norm`
 
+Run `python tests/test_lm_eval_llamalooped.py --backend hf --model meta-llama/Llama-3.2-1B-Instruct --sandwich_norm --lora_adapter_dir ${adapter} --tasks gsm8k`
+
 ## Llama Looped w/ AttnRes
+Run `python train/train_lora_llamalooped.py --model meta-llama/Llama-3.2-1B-Instruct --loop-attn-res --dataset whynlp/gsm8k-aug [--sandwich-norm]` 
+
 `LoopAttnResidual`: aggregates prior hidden states.
 
 ## Llama Looped Finetuning w/ Lora

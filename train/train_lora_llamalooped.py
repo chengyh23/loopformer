@@ -11,7 +11,8 @@ kwarg, so the backward-pass replay re-activates the right adapter).
 
 Run (single GPU):
     CUDA_VISIBLE_DEVICES=6 python train/train_lora_llamalooped.py \
-        --model meta-llama/Llama-3.2-3B-Instruct [--per-loop-lora]
+        --model meta-llama/Llama-3.2-3B-Instruct [--per-loop-lora] \
+        [--dataset whynlp/gsm8k-aug]
 
 Loss is logged to Weights & Biases when USE_WANDB=True (pip install wandb).
 """
@@ -70,31 +71,59 @@ USE_WANDB = True
 WANDB_PROJECT = "llama_looped_lora"
 
 
-def build_dataset(tok, n_train=None):
-    ds = load_dataset("gsm8k", "main", split="train")
+def _pack_prompt_response(tok, question, response_text):
+    # Prompt = chat-templated user turn (masked in the loss); response =
+    # tokenized response_text + EOS.
+    prompt_ids = tok.apply_chat_template(
+        [{"role": "user", "content": question}],
+        add_generation_prompt=True,
+        tokenize=True,
+        return_dict=False,
+    )
+    resp_ids = tok(response_text, add_special_tokens=False)["input_ids"]
+    resp_ids = resp_ids + [tok.eos_token_id]
+    input_ids = (prompt_ids + resp_ids)[:MAX_LEN]
+    labels = ([-100] * len(prompt_ids) + resp_ids)[:MAX_LEN]
+    return {
+        "input_ids": input_ids,
+        "labels": labels,
+        "attention_mask": [1] * len(input_ids),
+    }
+
+
+def format_example_gsm8k(ex, tok):
+    # gsm8k's answer is already "reasoning\n#### <final>".
+    return _pack_prompt_response(tok, ex["question"], ex["answer"])
+
+
+def format_example_gsm8k_aug(ex, tok):
+    # gsm8k-aug splits reasoning into calculator-annotated `steps` and a bare
+    # final `answer`; join them into the same "reasoning #### <final>" shape
+    # as plain GSM8K so training is directly comparable.
+    reasoning = "".join(step + " " for step in ex["steps"])
+    response = f"{reasoning}#### {ex['answer']}"
+    return _pack_prompt_response(tok, ex["question"], response)
+
+
+# dataset_name (as passed to --dataset) -> (load_dataset args, format_example
+# fn). Add an entry here to support a new dataset.
+DATASET_REGISTRY = {
+    "gsm8k": (("gsm8k", "main"), format_example_gsm8k),
+    "whynlp/gsm8k-aug": (("whynlp/gsm8k-aug",), format_example_gsm8k_aug),
+}
+
+
+def build_dataset(tok, n_train=None, dataset_name="gsm8k"):
+    if dataset_name not in DATASET_REGISTRY:
+        raise ValueError(
+            f"Unknown --dataset {dataset_name!r}; add an entry to "
+            f"DATASET_REGISTRY (known: {sorted(DATASET_REGISTRY)})"
+        )
+    load_args, format_fn = DATASET_REGISTRY[dataset_name]
+    ds = load_dataset(*load_args, split="train")
     if n_train:
         ds = ds.select(range(n_train))
-
-    def format_example(ex):
-        # Prompt = chat-templated user turn (masked in the loss); response =
-        # the full GSM8K answer (reasoning + "#### <final>") + EOS.
-        prompt_ids = tok.apply_chat_template(
-            [{"role": "user", "content": ex["question"]}],
-            add_generation_prompt=True,
-            tokenize=True,
-            return_dict=False,
-        )
-        resp_ids = tok(ex["answer"], add_special_tokens=False)["input_ids"]
-        resp_ids = resp_ids + [tok.eos_token_id]
-        input_ids = (prompt_ids + resp_ids)[:MAX_LEN]
-        labels = ([-100] * len(prompt_ids) + resp_ids)[:MAX_LEN]
-        return {
-            "input_ids": input_ids,
-            "labels": labels,
-            "attention_mask": [1] * len(input_ids),
-        }
-
-    return ds.map(format_example, remove_columns=ds.column_names)
+    return ds.map(lambda ex: format_fn(ex, tok), remove_columns=ds.column_names)
 
 
 def main():
@@ -104,15 +133,19 @@ def main():
     per_loop_lora = args_cli.per_loop_lora
     num_loops = args_cli.num_loops
     prc = args_cli.prc  # None or [prelude, coda]
+    dataset_name = args_cli.dataset
+    dataset_short = dataset_name.rstrip("/").split("/")[-1]
     suffix = (
         (f"_L{num_loops}" if num_loops != 4 else "")
         + ("_perloop" if per_loop_lora else "")
         + (f"_prc{prc[0]}-{prc[1]}" if prc else "")
         + ("_sandwich" if args_cli.sandwich_norm else "")
+        + ("_attnres" if args_cli.loop_attn_res else "")
+        + (f"_{dataset_short}" if dataset_name != "gsm8k" else "")
     )
     output_dir = os.path.join(OUTPUT_DIR_BASE, f"{model_short}_looped_lora{suffix}")
     run_name = (
-        f"{model_short}-gsm8k-lora-{RECUR_MODE}-L{num_loops}-r{LORA_R}"
+        f"{model_short}-{dataset_short}-lora-{RECUR_MODE}-L{num_loops}-r{LORA_R}"
         + suffix.replace("_", "-")
     )
 
@@ -124,7 +157,7 @@ def main():
         tok.pad_token = tok.eos_token
     tok.padding_side = "right"  # right-pad for causal-LM training
 
-    train_ds = build_dataset(tok, args_cli.n_train)
+    train_ds = build_dataset(tok, args_cli.n_train, dataset_name)
 
     model = LlamaLoopedForCausalLM.from_pretrained(
         model_name,
